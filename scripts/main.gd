@@ -25,6 +25,8 @@ var train_position: Vector2
 var travelling_to_b: bool = true
 var wait_remaining: float = 0.0
 var paused: bool = false
+var is_dragging: bool = false
+var drag_start: Vector2i = Vector2i.ZERO
 
 @onready var instructions: Label = $Interface/Instructions
 
@@ -54,38 +56,40 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
-			if event.keycode == KEY_R:
+			if event.keycode == KEY_ESCAPE:
+				is_dragging = false
+
+			if event.keycode == KEY_R and not is_dragging:
 				placing_vertical = not placing_vertical
 
 			if event.keycode == KEY_SPACE:
 				paused = not paused
 
 	if event is InputEventMouseButton:
-		if not event.pressed:
-			return
-
 		var cell: Vector2i = _mouse_to_cell()
 
-		if not _can_build_at(cell):
-			return
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			if event.pressed:
+				if _can_build_at(cell):
+					drag_start = cell
+					is_dragging = true
+			elif is_dragging:
+				_finish_track_drag(cell)
 
-		# Keep the station tracks in place.
-		if cell == STATION_A or cell == STATION_B:
-			return
+		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+			# Right-click cancels an active construction preview.
+			if is_dragging:
+				is_dragging = false
+				return
 
-		var changed: bool = false
+			if not _can_build_at(cell):
+				return
 
-		match event.button_index:
-			MOUSE_BUTTON_LEFT:
-				if not tracks.has(cell):
-					tracks[cell] = placing_vertical
-					changed = true
+			if cell == STATION_A or cell == STATION_B:
+				return
 
-			MOUSE_BUTTON_RIGHT:
-				changed = tracks.erase(cell)
-
-		if changed:
-			_check_route()
+			if tracks.erase(cell):
+				_check_route()
 
 
 func _check_route() -> void:
@@ -175,9 +179,9 @@ func _update_instructions() -> void:
 		status = "Paused. Press Space to resume."
 
 	instructions.text = (
-		"Left-click: build | Right-click: remove | R: rotate"
-		+ " | Space: pause | " + direction
-		+ "\n" + status
+		"Left-drag: build | Right-click: remove/cancel"
+		+ " | R: rotate single tile | Space: pause"
+		+ "\nEsc: cancel drag | " + direction + " | " + status
 	)
 
 
@@ -194,8 +198,15 @@ func _draw() -> void:
 	_draw_station(STATION_A, "Station A")
 	_draw_station(STATION_B, "Station B")
 
-	if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
-		_draw_track(hovered_cell, placing_vertical, true)
+	if is_dragging:
+		var vertical: bool = _drag_is_vertical(hovered_cell)
+
+		for cell in _get_drag_cells(hovered_cell):
+			if not tracks.has(cell):
+				_draw_track(cell, vertical, true)
+	else:
+		if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
+			_draw_track(hovered_cell, placing_vertical, true)
 
 	_draw_train()
 
@@ -322,3 +333,56 @@ func _draw_train() -> void:
 		),
 		Color(0.65, 0.85, 0.95)
 	)
+
+func _drag_is_vertical(end_cell: Vector2i) -> bool:
+	var difference: Vector2i = end_cell - drag_start
+
+	# A single click uses the orientation selected with R.
+	if difference == Vector2i.ZERO:
+		return placing_vertical
+
+	# A drag snaps to the axis with the largest movement.
+	return abs(difference.y) > abs(difference.x)
+
+
+func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+
+	if _drag_is_vertical(end_cell):
+		var first_y: int = mini(drag_start.y, end_cell.y)
+		var last_y: int = maxi(drag_start.y, end_cell.y)
+
+		for y in range(first_y, last_y + 1):
+			var cell := Vector2i(drag_start.x, y)
+
+			if _can_build_at(cell):
+				cells.append(cell)
+	else:
+		var first_x: int = mini(drag_start.x, end_cell.x)
+		var last_x: int = maxi(drag_start.x, end_cell.x)
+
+		for x in range(first_x, last_x + 1):
+			var cell := Vector2i(x, drag_start.y)
+
+			if _can_build_at(cell):
+				cells.append(cell)
+
+	return cells
+
+
+func _finish_track_drag(end_cell: Vector2i) -> void:
+	var vertical: bool = _drag_is_vertical(end_cell)
+	var changed: bool = false
+
+	for cell in _get_drag_cells(end_cell):
+		# Preserve existing tracks, including station tracks.
+		if not tracks.has(cell):
+			tracks[cell] = vertical
+			changed = true
+
+	is_dragging = false
+
+	if changed:
+		_check_route()
+
+	queue_redraw()
