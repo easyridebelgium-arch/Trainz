@@ -1,0 +1,9 @@
+# Godot's generated cache
+.godot/
+
+# Exported game builds
+builds/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
