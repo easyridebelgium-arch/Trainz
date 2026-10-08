@@ -14,12 +14,36 @@ const PASSENGERS_PER_BATCH: int = 3
 const MAX_STATION_QUEUE: int = 100
 const TICKET_PRICE: int = 5
 
+const STARTING_BALANCE: int = 1000
+const TRACK_BUILD_COST: int = 10
+const TRACK_REFUND: int = 5
+const OPERATING_COST_PER_SECOND: int = 1
+
 # Station positions in grid coordinates.
 const STATION_A: Vector2i = Vector2i(4, 8)
 const STATION_B: Vector2i = Vector2i(20, 8)
 
 const TRAIN_SPEED: float = 80.0
 const STATION_WAIT: float = 2.0
+
+const SAVE_PATH: String = "user://trainz_save.json"
+const SAVE_TEMP_PATH: String = "user://trainz_save.tmp"
+
+const SAVE_FIELDS: Array[String] = [
+	"money",
+	"total_operating_cost",
+	"total_construction_cost",
+	"waiting_at_a",
+	"waiting_at_b",
+	"passengers_on_train",
+	"passengers_delivered",
+	"passenger_timer",
+	"operating_timer",
+	"travelling_to_b",
+	"wait_remaining",
+	"train_needs_boarding",
+	"paused"
+]
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -39,10 +63,17 @@ var waiting_at_b: int = 8
 var passengers_on_train: int = 0
 
 var passengers_delivered: int = 0
-var money: int = 0
+var money: int = STARTING_BALANCE
 
 var passenger_timer: float = 0.0
 var train_needs_boarding: bool = true
+
+var operating_timer: float = 0.0
+var total_operating_cost: int = 0
+var total_construction_cost: int = 0
+
+var notice: String = ""
+var notice_remaining: float = 0.0
 
 @onready var instructions: Label = $Interface/Instructions
 
@@ -62,11 +93,16 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	hovered_cell = _mouse_to_cell()
 
+	# Interface messages expire even while simulation is paused.
+	if notice_remaining > 0.0:
+		notice_remaining = maxf(0.0, notice_remaining - delta)
+
 	if not paused:
 		_generate_passengers(delta)
 
 		if route_connected:
 			_move_train(delta)
+			_charge_operating_cost(delta)
 
 	_update_instructions()
 	queue_redraw()
@@ -75,6 +111,14 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
+			if event.keycode == KEY_F6:
+				_save_game()
+				return
+
+			if event.keycode == KEY_F9:
+				_load_game()
+				return
+
 			if event.keycode == KEY_ESCAPE:
 				is_dragging = false
 
@@ -108,6 +152,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 
 			if tracks.erase(cell):
+				money += TRACK_REFUND
+				_show_notice("Track removed. Refunded £%d." % TRACK_REFUND)
 				_check_route()
 
 
@@ -203,6 +249,13 @@ func _can_build_at(cell: Vector2i) -> bool:
 
 func _update_instructions() -> void:
 	var direction: String = "Vertical" if placing_vertical else "Horizontal"
+
+	if is_dragging:
+		direction = (
+			"Vertical" if _drag_is_vertical(hovered_cell)
+			else "Horizontal"
+		)
+
 	var status: String = "Connect the stations with horizontal track."
 
 	if route_connected:
@@ -216,19 +269,35 @@ func _update_instructions() -> void:
 	if paused:
 		status = "Paused. Press Space to resume."
 
+	if notice_remaining > 0.0:
+		status = notice
+
+	var preview_cost: int = _get_preview_cost()
+	var affordability: String = ""
+
+	if preview_cost > 0 and preview_cost > money:
+		affordability = " — insufficient funds"
+
 	instructions.text = (
 		"Left-drag: build | Right-click: remove/cancel"
-		+ " | R: rotate | Space: pause | Esc: cancel"
-		+ "\nPlacement: " + direction + " | " + status
-		+ "\nWaiting: A %d / B %d | Onboard: %d/%d"
+		+ " | R: rotate | Space: pause | Esc: cancel | F6: save | F9: load"
+		+ "\n%s | Build: £%d%s | %s"
+		% [direction, preview_cost, affordability, status]
+		+ "\nWaiting: A %d / B %d | Onboard: %d/%d | Delivered: %d"
 		% [
 			waiting_at_a,
 			waiting_at_b,
 			passengers_on_train,
-			TRAIN_CAPACITY
+			TRAIN_CAPACITY,
+			passengers_delivered
 		]
-		+ "\nDelivered: %d | Ticket income: £%d"
-		% [passengers_delivered, money]
+		+ "\nBalance: £%d | Fares: £%d | Construction: £%d | Operations: £%d"
+		% [
+			money,
+			passengers_delivered * TICKET_PRICE,
+			total_construction_cost,
+			total_operating_cost
+		]
 	)
 
 
@@ -419,18 +488,40 @@ func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
 
 func _finish_track_drag(end_cell: Vector2i) -> void:
 	var vertical: bool = _drag_is_vertical(end_cell)
-	var changed: bool = false
+	var new_cells: Array[Vector2i] = []
 
 	for cell in _get_drag_cells(end_cell):
-		# Preserve existing tracks, including station tracks.
 		if not tracks.has(cell):
-			tracks[cell] = vertical
-			changed = true
+			new_cells.append(cell)
 
 	is_dragging = false
 
-	if changed:
-		_check_route()
+	if new_cells.is_empty():
+		queue_redraw()
+		return
+
+	var cost: int = new_cells.size() * TRACK_BUILD_COST
+
+	if money < cost:
+		_show_notice(
+			"Insufficient funds: need £%d, available £%d."
+			% [cost, money]
+		)
+		queue_redraw()
+		return
+
+	for cell in new_cells:
+		tracks[cell] = vertical
+
+	money -= cost
+	total_construction_cost += cost
+
+	_check_route()
+
+	_show_notice(
+		"Built %d track tiles for £%d."
+		% [new_cells.size(), cost]
+	)
 
 	queue_redraw()
 
@@ -473,3 +564,265 @@ func _unload_passengers() -> void:
 	passengers_delivered += passengers_on_train
 	money += passengers_on_train * TICKET_PRICE
 	passengers_on_train = 0
+
+func _charge_operating_cost(delta: float) -> void:
+	operating_timer += delta
+
+	while operating_timer >= 1.0:
+		operating_timer -= 1.0
+		money -= OPERATING_COST_PER_SECOND
+		total_operating_cost += OPERATING_COST_PER_SECOND
+
+
+func _show_notice(message: String) -> void:
+	notice = message
+	notice_remaining = 4.0
+	
+func _get_preview_cost() -> int:
+	var tile_count: int = 0
+
+	if is_dragging:
+		for cell in _get_drag_cells(hovered_cell):
+			if not tracks.has(cell):
+				tile_count += 1
+	elif _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
+		tile_count = 1
+
+	return tile_count * TRACK_BUILD_COST
+
+func _save_game() -> void:
+	if is_dragging:
+		_show_notice("Finish or cancel track placement before saving.")
+		return
+
+	var saved_tracks: Array = []
+
+	for cell in tracks:
+		saved_tracks.append([
+			cell.x,
+			cell.y,
+			tracks[cell]
+		])
+
+	var state: Dictionary = {}
+
+	for field in SAVE_FIELDS:
+		state[field] = get(field)
+
+	var data: Dictionary = {
+		"version": 1,
+		"tracks": saved_tracks,
+		"train_x": train_position.x,
+		"state": state
+	}
+
+	# Write a temporary file first to protect the previous save
+	# if writing fails.
+	var file := FileAccess.open(SAVE_TEMP_PATH, FileAccess.WRITE)
+
+	if file == null:
+		_show_notice("Could not open the save file.")
+		return
+
+	file.store_string(JSON.stringify(data, "\t"))
+	file.flush()
+
+	var write_error: Error = file.get_error()
+	file.close()
+
+	if write_error != OK:
+		_show_notice("Saving failed while writing the file.")
+		return
+
+	var rename_error: Error = DirAccess.rename_absolute(
+		ProjectSettings.globalize_path(SAVE_TEMP_PATH),
+		ProjectSettings.globalize_path(SAVE_PATH)
+	)
+
+	if rename_error != OK:
+		_show_notice("Could not replace the previous save.")
+		return
+
+	_show_notice("Game saved.")
+	
+func _is_valid_number(value: Variant) -> bool:
+	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
+		return false
+
+	return is_finite(float(value))
+
+
+func _is_valid_save(data: Dictionary) -> bool:
+	if data.get("version") != 1:
+		return false
+
+	if not data.get("tracks") is Array:
+		return false
+
+	if not data.get("state") is Dictionary:
+		return false
+
+	if not _is_valid_number(data.get("train_x")):
+		return false
+
+	var train_x: float = float(data["train_x"])
+
+	if train_x < _cell_center(STATION_A).x:
+		return false
+
+	if train_x > _cell_center(STATION_B).x:
+		return false
+
+	var state: Dictionary = data["state"]
+
+	for field in SAVE_FIELDS:
+		if not state.has(field):
+			return false
+
+		var current_value: Variant = get(field)
+		var saved_value: Variant = state[field]
+
+		if typeof(current_value) == TYPE_BOOL:
+			if typeof(saved_value) != TYPE_BOOL:
+				return false
+		else:
+			if not _is_valid_number(saved_value):
+				return false
+
+			var number: float = float(saved_value)
+
+			# Keep values within a reasonable range for this prototype.
+			if absf(number) > 1_000_000_000.0:
+				return false
+
+			if typeof(current_value) == TYPE_INT:
+				if number != floor(number):
+					return false
+
+			if field != "money" and number < 0.0:
+				return false
+
+	if float(state["passengers_on_train"]) > TRAIN_CAPACITY:
+		return false
+
+	if float(state["wait_remaining"]) > STATION_WAIT:
+		return false
+
+	if float(state["passenger_timer"]) >= PASSENGER_INTERVAL:
+		return false
+
+	if float(state["operating_timer"]) >= 1.0:
+		return false
+
+	var checked_tracks: Dictionary = {}
+
+	for entry in data["tracks"]:
+		if not entry is Array:
+			return false
+
+		if entry.size() != 3:
+			return false
+
+		if not _is_valid_number(entry[0]):
+			return false
+
+		if not _is_valid_number(entry[1]):
+			return false
+
+		if typeof(entry[2]) != TYPE_BOOL:
+			return false
+
+		var x: float = float(entry[0])
+		var y: float = float(entry[1])
+
+		if x != floor(x) or y != floor(y):
+			return false
+
+		if x < 0 or x > 10000:
+			return false
+
+		if y < BUILD_START_ROW or y > 10000:
+			return false
+
+		var cell := Vector2i(int(x), int(y))
+
+		if checked_tracks.has(cell):
+			return false
+
+		checked_tracks[cell] = entry[2]
+
+	# Both stations must retain their horizontal tracks.
+	for station in [STATION_A, STATION_B]:
+		if not checked_tracks.has(station):
+			return false
+
+		if checked_tracks[station] != false:
+			return false
+
+	return true
+	
+func _load_game() -> void:
+	if not FileAccess.file_exists(SAVE_PATH):
+		_show_notice("No saved game yet. Press F6 to save.")
+		return
+
+	var file := FileAccess.open(SAVE_PATH, FileAccess.READ)
+
+	if file == null:
+		_show_notice("Could not open the saved game.")
+		return
+
+	var contents: String = file.get_as_text()
+	file.close()
+
+	var parser := JSON.new()
+
+	if parser.parse(contents) != OK:
+		_show_notice("The save file could not be read.")
+		return
+
+	if not parser.data is Dictionary:
+		_show_notice("The save file has an invalid format.")
+		return
+
+	var data: Dictionary = parser.data
+
+	if not _is_valid_save(data):
+		_show_notice("The save file is damaged or incompatible.")
+		return
+
+	# Validation succeeded. It is now safe to replace the game state.
+	var loaded_tracks: Dictionary = {}
+
+	for entry in data["tracks"]:
+		var cell := Vector2i(int(entry[0]), int(entry[1]))
+		loaded_tracks[cell] = entry[2]
+
+	tracks = loaded_tracks
+
+	var state: Dictionary = data["state"]
+
+	for field in SAVE_FIELDS:
+		var current_value: Variant = get(field)
+
+		match typeof(current_value):
+			TYPE_INT:
+				set(field, int(state[field]))
+			TYPE_FLOAT:
+				set(field, float(state[field]))
+			TYPE_BOOL:
+				set(field, state[field])
+
+	train_position = Vector2(
+		float(data["train_x"]),
+		_cell_center(STATION_A).y
+	)
+
+	is_dragging = false
+
+	# Recalculate connectivity from the loaded track layout.
+	_check_route()
+
+	_update_instructions()
+	_show_notice("Game loaded.")
+	queue_redraw()
