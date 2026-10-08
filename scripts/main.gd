@@ -75,6 +75,9 @@ var total_construction_cost: int = 0
 var notice: String = ""
 var notice_remaining: float = 0.0
 
+# Empty means straight track. Other values connect two compass directions.
+var selected_curve: String = ""
+
 @onready var instructions: Label = $Interface/Instructions
 
 
@@ -122,8 +125,25 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.keycode == KEY_ESCAPE:
 				is_dragging = false
 
+			if event.keycode == KEY_T and not is_dragging:
+				if selected_curve.is_empty():
+					selected_curve = "NE"
+				else:
+					selected_curve = ""
+
 			if event.keycode == KEY_R and not is_dragging:
-				placing_vertical = not placing_vertical
+				if selected_curve.is_empty():
+					placing_vertical = not placing_vertical
+				else:
+					match selected_curve:
+						"NE":
+							selected_curve = "SE"
+						"SE":
+							selected_curve = "SW"
+						"SW":
+							selected_curve = "NW"
+						"NW":
+							selected_curve = "NE"
 
 			if event.keycode == KEY_SPACE:
 				paused = not paused
@@ -168,7 +188,7 @@ func _check_route() -> void:
 			route_connected = false
 			break
 
-		if tracks[cell] == true:
+		if tracks[cell] != false:
 			route_connected = false
 			break
 
@@ -250,7 +270,9 @@ func _can_build_at(cell: Vector2i) -> bool:
 func _update_instructions() -> void:
 	var direction: String = "Vertical" if placing_vertical else "Horizontal"
 
-	if is_dragging:
+	if not selected_curve.is_empty():
+		direction = "Curve " + selected_curve
+	elif is_dragging:
 		direction = (
 			"Vertical" if _drag_is_vertical(hovered_cell)
 			else "Horizontal"
@@ -280,7 +302,8 @@ func _update_instructions() -> void:
 
 	instructions.text = (
 		"Left-drag: build | Right-click: remove/cancel"
-		+ " | R: rotate | Space: pause | Esc: cancel | F6: save | F9: load"
+		+ " | T: straight/curve | R: rotate"
+		+ " | Space: pause | Esc: cancel | F6/F9: save/load"
 		+ "\n%s | Build: £%d%s | %s"
 		% [direction, preview_cost, affordability, status]
 		+ "\nWaiting: A %d / B %d | Onboard: %d/%d | Delivered: %d"
@@ -315,14 +338,22 @@ func _draw() -> void:
 	_draw_station(STATION_B, "Station B")
 
 	if is_dragging:
-		var vertical: bool = _drag_is_vertical(hovered_cell)
+		var track_type: Variant = _drag_is_vertical(hovered_cell)
+
+		if not selected_curve.is_empty():
+			track_type = selected_curve
 
 		for cell in _get_drag_cells(hovered_cell):
 			if not tracks.has(cell):
-				_draw_track(cell, vertical, true)
+				_draw_track(cell, track_type, true)
 	else:
 		if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
-			_draw_track(hovered_cell, placing_vertical, true)
+			var track_type: Variant = placing_vertical
+
+			if not selected_curve.is_empty():
+				track_type = selected_curve
+
+			_draw_track(hovered_cell, track_type, true)
 
 	_draw_train()
 
@@ -354,9 +385,14 @@ func _draw_grid() -> void:
 
 func _draw_track(
 	cell: Vector2i,
-	vertical: bool,
+	track_type: Variant,
 	preview: bool
 ) -> void:
+	if track_type is String:
+		_draw_curve(cell, track_type, preview)
+		return
+
+	var vertical: bool = bool(track_type)
 	var origin: Vector2 = Vector2(cell) * TILE_SIZE
 	var rail_color: Color = PREVIEW_COLOR if preview else RAIL_COLOR
 	var sleeper_color: Color = SLEEPER_COLOR
@@ -464,6 +500,12 @@ func _drag_is_vertical(end_cell: Vector2i) -> bool:
 func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
 
+	if not selected_curve.is_empty():
+		if _can_build_at(drag_start):
+			cells.append(drag_start)
+
+		return cells
+
 	if _drag_is_vertical(end_cell):
 		var first_y: int = mini(drag_start.y, end_cell.y)
 		var last_y: int = maxi(drag_start.y, end_cell.y)
@@ -511,7 +553,10 @@ func _finish_track_drag(end_cell: Vector2i) -> void:
 		return
 
 	for cell in new_cells:
-		tracks[cell] = vertical
+		if selected_curve.is_empty():
+			tracks[cell] = vertical
+		else:
+			tracks[cell] = selected_curve
 
 	money -= cost
 	total_construction_cost += cost
@@ -610,7 +655,7 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 1,
+		"version": 2,
 		"tracks": saved_tracks,
 		"train_x": train_position.x,
 		"state": state
@@ -653,7 +698,7 @@ func _is_valid_number(value: Variant) -> bool:
 
 
 func _is_valid_save(data: Dictionary) -> bool:
-	if data.get("version") != 1:
+	if data.get("version") not in [1, 2]:
 		return false
 
 	if not data.get("tracks") is Array:
@@ -729,7 +774,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 		if not _is_valid_number(entry[1]):
 			return false
 
-		if typeof(entry[2]) != TYPE_BOOL:
+		if not _is_valid_track_type(entry[2]):
 			return false
 
 		var x: float = float(entry[0])
@@ -826,3 +871,75 @@ func _load_game() -> void:
 	_update_instructions()
 	_show_notice("Game loaded.")
 	queue_redraw()
+
+func _draw_curve(
+	cell: Vector2i,
+	curve: String,
+	preview: bool
+) -> void:
+	var origin: Vector2 = Vector2(cell) * TILE_SIZE
+	var center: Vector2
+	var start_angle: float
+
+	match curve:
+		"NE":
+			center = origin + Vector2(TILE_SIZE, 0)
+			start_angle = PI / 2.0
+		"SE":
+			center = origin + Vector2(TILE_SIZE, TILE_SIZE)
+			start_angle = PI
+		"SW":
+			center = origin + Vector2(0, TILE_SIZE)
+			start_angle = PI * 1.5
+		"NW":
+			center = origin
+			start_angle = 0.0
+		_:
+			return
+
+	var end_angle: float = start_angle + PI / 2.0
+	var rail_color: Color = PREVIEW_COLOR if preview else RAIL_COLOR
+	var sleeper_color: Color = SLEEPER_COLOR
+
+	if preview:
+		sleeper_color.a = 0.5
+
+		draw_rect(
+			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
+			Color(0.35, 0.9, 0.55, 0.12)
+		)
+
+	# Sleepers cross the curved rails.
+	for index in range(4):
+		var fraction: float = (float(index) + 0.5) / 4.0
+		var angle: float = lerpf(start_angle, end_angle, fraction)
+		var direction := Vector2(cos(angle), sin(angle))
+
+		draw_line(
+			center + direction * 6.0,
+			center + direction * 26.0,
+			sleeper_color,
+			4.0
+		)
+
+	# Match the spacing of the straight rails at each cell edge.
+	for radius in [10.0, 22.0]:
+		draw_arc(
+			center,
+			radius,
+			start_angle,
+			end_angle,
+			13,
+			rail_color,
+			2.0,
+			false
+		)
+		
+func _is_valid_track_type(value: Variant) -> bool:
+	if typeof(value) == TYPE_BOOL:
+		return true
+
+	if typeof(value) == TYPE_STRING:
+		return value in ["NE", "SE", "SW", "NW"]
+
+	return false
