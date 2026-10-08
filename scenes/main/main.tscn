@@ -1,13 +1,13 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene format=3 uid="uid://c275cr7km0y67"]
 
-[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="Script" uid="uid://boqv7cw06octi" path="res://scripts/main.gd" id="1_main"]
 
-[node name="Main" type="Node2D"]
+[node name="Main" type="Node2D" unique_id=1690144118]
 script = ExtResource("1_main")
 
-[node name="Interface" type="CanvasLayer" parent="."]
+[node name="Interface" type="CanvasLayer" parent="." unique_id=1671317200]
 
-[node name="Title" type="Label" parent="Interface"]
+[node name="Title" type="Label" parent="Interface" unique_id=418163251]
 offset_left = 24.0
 offset_top = 20.0
 offset_right = 600.0
@@ -15,7 +15,7 @@ offset_bottom = 60.0
 theme_override_font_sizes/font_size = 28
 text = "Trainz — Railway Builder"
 
-[node name="Instructions" type="Label" parent="Interface"]
+[node name="Instructions" type="Label" parent="Interface" unique_id=202275825]
 offset_left = 24.0
 offset_top = 64.0
 offset_right = 900.0
