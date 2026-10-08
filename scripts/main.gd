@@ -1,12 +1,18 @@
 extends Node2D
 
 const TILE_SIZE: int = 32
-const BUILD_START_ROW: int = 3
+const BUILD_START_ROW: int = 5
 
 const GRID_COLOR: Color = Color(0.18, 0.23, 0.25)
 const SLEEPER_COLOR: Color = Color(0.43, 0.29, 0.17)
 const RAIL_COLOR: Color = Color(0.78, 0.82, 0.85)
 const PREVIEW_COLOR: Color = Color(0.35, 0.9, 0.55, 0.8)
+
+const TRAIN_CAPACITY: int = 20
+const PASSENGER_INTERVAL: float = 5.0
+const PASSENGERS_PER_BATCH: int = 3
+const MAX_STATION_QUEUE: int = 100
+const TICKET_PRICE: int = 5
 
 # Station positions in grid coordinates.
 const STATION_A: Vector2i = Vector2i(4, 8)
@@ -28,6 +34,16 @@ var paused: bool = false
 var is_dragging: bool = false
 var drag_start: Vector2i = Vector2i.ZERO
 
+var waiting_at_a: int = 8
+var waiting_at_b: int = 8
+var passengers_on_train: int = 0
+
+var passengers_delivered: int = 0
+var money: int = 0
+
+var passenger_timer: float = 0.0
+var train_needs_boarding: bool = true
+
 @onready var instructions: Label = $Interface/Instructions
 
 
@@ -46,8 +62,11 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	hovered_cell = _mouse_to_cell()
 
-	if route_connected and not paused:
-		_move_train(delta)
+	if not paused:
+		_generate_passengers(delta)
+
+		if route_connected:
+			_move_train(delta)
 
 	_update_instructions()
 	queue_redraw()
@@ -109,15 +128,30 @@ func _check_route() -> void:
 
 	# Reset the demonstration train if the connection is broken.
 	if not route_connected:
+		# Return any onboard passengers to their departure station.
+		# These refunds may temporarily exceed the normal queue limit.
+		if passengers_on_train > 0:
+			if travelling_to_b:
+				waiting_at_a += passengers_on_train
+			else:
+				waiting_at_b += passengers_on_train
+
+		passengers_on_train = 0
 		train_position = _cell_center(STATION_A)
 		travelling_to_b = true
 		wait_remaining = 0.0
+		train_needs_boarding = true
 
 
 func _move_train(delta: float) -> void:
 	if wait_remaining > 0.0:
 		wait_remaining = maxf(0.0, wait_remaining - delta)
 		return
+
+	# Board once, immediately before departure.
+	if train_needs_boarding:
+		_board_passengers()
+		train_needs_boarding = false
 
 	var destination: Vector2 = _cell_center(
 		STATION_B if travelling_to_b else STATION_A
@@ -130,8 +164,12 @@ func _move_train(delta: float) -> void:
 
 	if train_position.distance_to(destination) < 0.01:
 		train_position = destination
+
+		_unload_passengers()
+
 		travelling_to_b = not travelling_to_b
 		wait_remaining = STATION_WAIT
+		train_needs_boarding = true
 
 
 func _cell_center(cell: Vector2i) -> Vector2:
@@ -169,9 +207,9 @@ func _update_instructions() -> void:
 
 	if route_connected:
 		if wait_remaining > 0.0:
-			status = "Train stopped at station."
+			status = "At station: departing in %.1f seconds." % wait_remaining
 		else:
-			status = "Train travelling to " + (
+			status = "Travelling to " + (
 				"Station B." if travelling_to_b else "Station A."
 			)
 
@@ -180,8 +218,17 @@ func _update_instructions() -> void:
 
 	instructions.text = (
 		"Left-drag: build | Right-click: remove/cancel"
-		+ " | R: rotate single tile | Space: pause"
-		+ "\nEsc: cancel drag | " + direction + " | " + status
+		+ " | R: rotate | Space: pause | Esc: cancel"
+		+ "\nPlacement: " + direction + " | " + status
+		+ "\nWaiting: A %d / B %d | Onboard: %d/%d"
+		% [
+			waiting_at_a,
+			waiting_at_b,
+			passengers_on_train,
+			TRAIN_CAPACITY
+		]
+		+ "\nDelivered: %d | Ticket income: £%d"
+		% [passengers_delivered, money]
 	)
 
 
@@ -386,3 +433,43 @@ func _finish_track_drag(end_cell: Vector2i) -> void:
 		_check_route()
 
 	queue_redraw()
+
+func _generate_passengers(delta: float) -> void:
+	passenger_timer += delta
+
+	while passenger_timer >= PASSENGER_INTERVAL:
+		passenger_timer -= PASSENGER_INTERVAL
+
+		if waiting_at_a < MAX_STATION_QUEUE:
+			waiting_at_a = mini(
+				waiting_at_a + PASSENGERS_PER_BATCH,
+				MAX_STATION_QUEUE
+			)
+
+		if waiting_at_b < MAX_STATION_QUEUE:
+			waiting_at_b = mini(
+				waiting_at_b + PASSENGERS_PER_BATCH,
+				MAX_STATION_QUEUE
+			)
+
+
+func _board_passengers() -> void:
+	var available_seats: int = TRAIN_CAPACITY - passengers_on_train
+	var boarding: int = 0
+
+	if travelling_to_b:
+		# Departing Station A.
+		boarding = mini(waiting_at_a, available_seats)
+		waiting_at_a -= boarding
+	else:
+		# Departing Station B.
+		boarding = mini(waiting_at_b, available_seats)
+		waiting_at_b -= boarding
+
+	passengers_on_train += boarding
+
+
+func _unload_passengers() -> void:
+	passengers_delivered += passengers_on_train
+	money += passengers_on_train * TICKET_PRICE
+	passengers_on_train = 0
