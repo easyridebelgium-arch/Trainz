@@ -78,6 +78,7 @@ const LOG_DELIVERY_PRICE: int = 8
 const SAVE_VERSION: int = 11
 const MAX_CONSTRUCTION_HISTORY: int = 100
 const TOOLBAR_ICON_SHEET = preload("res://assets/ui/icons/toolbar.svg")
+const NetworkMap = preload("res://scripts/network_map.gd")
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -147,6 +148,8 @@ var demolition_mode: bool = false
 var demolition_cells: Dictionary = {}
 var demolition_last_cell: Vector2i = Vector2i.ZERO
 var toolbar_icon_textures: Array[Texture2D] = []
+var network_map: NetworkMap
+var map_button: Button
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -179,6 +182,7 @@ func _ready() -> void:
 	_setup_camera_keys()
 	_setup_freight_train()
 	_setup_history_controls()
+	_setup_network_map()
 	_setup_modern_ui_theme()
 	_setup_toolbar_icons()
 
@@ -205,11 +209,15 @@ func _process(delta: float) -> void:
 	_update_toolbar()
 	_update_station_inspector()
 	_update_history_controls()
+	_update_network_map()
 	queue_redraw()
 	
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
+			if event.keycode == KEY_M:
+				_toggle_network_map()
+				return
 			if event.keycode == KEY_HOME:
 				is_dragging = false
 				is_panning = false
@@ -2670,3 +2678,96 @@ func _setup_toolbar_icons() -> void:
 	backup_button.tooltip_text = "Load previous save"
 
 	_update_toolbar()
+func _setup_network_map() -> void:
+	network_map = NetworkMap.new()
+	network_map.name = "NetworkMap"
+	network_map.map_cells = Vector2i(MAP_WIDTH, MAP_HEIGHT)
+	network_map.world_tile_size = float(TILE_SIZE)
+
+	network_map.facilities = [
+		{
+			"cell": STATION_A,
+			"color": Color("#F4D56A")
+		},
+		{
+			"cell": STATION_B,
+			"color": Color("#F4D56A")
+		},
+		{
+			"cell": FOREST_SITE,
+			"color": Color("#6ED68C")
+		},
+		{
+			"cell": CARGO_TERMINAL,
+			"color": Color("#F0A75A")
+		}
+	]
+
+	$Interface.add_child(network_map)
+
+	network_map.set_anchors_and_offsets_preset(
+		Control.PRESET_BOTTOM_LEFT
+	)
+
+	network_map.offset_left = 24.0
+	network_map.offset_right = 304.0
+	network_map.offset_top = -264.0
+	network_map.offset_bottom = -64.0
+
+	network_map.navigation_requested.connect(
+		_on_map_navigation_requested
+	)
+
+	map_button = Button.new()
+	map_button.text = "Map"
+	map_button.toggle_mode = true
+	map_button.button_pressed = true
+	map_button.focus_mode = Control.FOCUS_NONE
+	map_button.tooltip_text = "Show or hide the network map — M"
+	map_button.pressed.connect(_toggle_network_map)
+
+	$Interface/ConstructionHistory.add_child(map_button)
+
+	_update_network_map()
+
+
+func _update_network_map() -> void:
+	if not network_map.visible:
+		return
+
+	network_map.track_data = tracks
+
+	network_map.train_positions = [
+		train_position,
+		freight_train.position
+	]
+
+	var visible_world_size: Vector2 = (
+		get_viewport_rect().size / camera.zoom
+	)
+
+	var center: Vector2 = camera.get_screen_center_position()
+
+	network_map.camera_world_rect = Rect2(
+		center - visible_world_size / 2.0,
+		visible_world_size
+	)
+
+	network_map.queue_redraw()
+
+
+func _on_map_navigation_requested(world_position: Vector2) -> void:
+	# Navigation cancels an unfinished construction gesture.
+	is_dragging = false
+	is_panning = false
+	demolition_cells.clear()
+
+	camera.position = world_position
+	camera.force_update_scroll()
+
+
+func _toggle_network_map() -> void:
+	network_map.visible = not network_map.visible
+	network_map.cancel_navigation()
+
+	map_button.set_pressed_no_signal(network_map.visible)
