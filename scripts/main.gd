@@ -46,7 +46,9 @@ const SAVE_FIELDS: Array[String] = [
 	"speed_upgrade_level",
 	"forest_stock",
 	"logs_produced",
-	"log_production_timer"
+	"log_production_timer",
+	"logs_delivered",
+	"freight_income"
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
@@ -69,6 +71,8 @@ const CARGO_TERMINAL: Vector2i = Vector2i(28, 24)
 const LOG_PRODUCTION_INTERVAL: float = 10.0
 const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
+const FreightTrain = preload("res://scripts/freight_train.gd")
+const LOG_DELIVERY_PRICE: int = 8
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -120,6 +124,9 @@ var speed_upgrade_button: Button
 var forest_stock: int = 0
 var logs_produced: int = 0
 var log_production_timer: float = 0.0
+var freight_train: FreightTrain
+var logs_delivered: int = 0
+var freight_income: int = 0
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -150,7 +157,7 @@ func _ready() -> void:
 	_reset_camera()
 	_setup_station_inspector()
 	_setup_camera_keys()
-
+	_setup_freight_train()
 
 func _process(delta: float) -> void:
 	_move_camera_with_keyboard(delta)
@@ -163,6 +170,7 @@ func _process(delta: float) -> void:
 	if not paused:
 		_generate_passengers(delta)
 		_produce_logs(delta)
+		forest_stock -= freight_train.advance(delta, forest_stock)
 
 		if route_connected:
 			_move_train(delta)
@@ -244,6 +252,7 @@ func _check_route() -> void:
 		STATION_A,
 		STATION_B
 	)
+	_refresh_freight_route(new_route)
 
 	# Building elsewhere should not interrupt the current service.
 	if new_route == route_cells:
@@ -799,10 +808,11 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 6,
+		"version": 7,
 		"tracks": saved_tracks,
 		"route_distance": route_distance,
-		"state": state
+		"state": state,
+		"freight": freight_train.save_state()
 	}
 
 	# Prepare the new save before touching the existing one.
@@ -863,7 +873,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 	if version_number != floor(version_number):
 		return false
 
-	if version_number < 1.0 or version_number > 6.0:
+	if version_number < 1.0 or version_number > 7.0:
 		return false
 
 	var version: int = int(version_number)
@@ -872,6 +882,8 @@ func _is_valid_save(data: Dictionary) -> bool:
 		return false
 
 	if not data.get("state") is Dictionary:
+		return false
+	if not data.get("freight") is Dictionary:
 		return false
 
 	if version >= 3:
@@ -1053,6 +1065,10 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 				old_state["forest_stock"] = 0
 				old_state["logs_produced"] = 0
 				old_state["log_production_timer"] = 0.0
+			if old_version >= 1.0 and old_version <= 6.0:
+				old_state["logs_delivered"] = 0
+				old_state["freight_income"] = 0
+				data["freight"] = FreightTrain.empty_state()
 	if not _is_valid_save(data):
 		_show_notice("The save file is damaged or incompatible.")
 		return
@@ -1112,7 +1128,31 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	elif loaded_distance > loaded_path.get_baked_length() + 0.001:
 		_show_notice("Saved train position is outside the route.")
 		return
+	var loaded_freight_cells: Array[Vector2i] = _find_freight_route(
+		loaded_tracks,
+		loaded_cells
+	)
 
+	var loaded_freight_path: Curve2D = RailRouter.make_path(
+		loaded_freight_cells,
+		float(TILE_SIZE)
+	)
+
+	var loaded_freight_state: Dictionary = data["freight"].duplicate()
+
+	# If facility cleanup changed the map, return the freight train
+	# to the forest while keeping its cargo onboard.
+	if removed_count > 0:
+		loaded_freight_state["distance"] = 0.0
+		loaded_freight_state["to_terminal"] = true
+		loaded_freight_state["dwell"] = 0.0
+
+	if not FreightTrain.is_valid_state(
+		loaded_freight_state,
+		loaded_freight_path.get_baked_length()
+	):
+		_show_notice("Saved freight train state is invalid.")
+		return
 	# All checks passed. Apply the loaded state.
 	tracks = loaded_tracks
 	route_cells = loaded_cells
@@ -1139,6 +1179,8 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	is_dragging = false
 
 	_update_train_transform()
+	freight_train.set_route(loaded_freight_cells, float(TILE_SIZE))
+	freight_train.restore_state(loaded_freight_state)
 	if removed_count > 0:
 		_show_notice(
 			"Loaded: removed %d tracks from station space; refunded £%d."
@@ -1746,6 +1788,11 @@ func _update_freight_inspector() -> void:
 	capacity_upgrade_button.hide()
 	speed_upgrade_button.hide()
 
+	var train_status: String = freight_train.status_text()
+
+	if paused:
+		train_status = "Paused — " + train_status
+
 	if selected_station == FOREST_SITE:
 		station_title.text = "Forest"
 
@@ -1756,38 +1803,42 @@ func _update_freight_inspector() -> void:
 		elif paused:
 			production_status = "Paused"
 
-		var time_remaining: float = maxf(
-			0.0,
-			LOG_PRODUCTION_INTERVAL - log_production_timer
-		)
-
 		station_details.text = (
 			"Produces: logs"
 			+ "\nDestination: cargo terminal"
 			+ "\n\nStored: %d / %d"
 			+ "\nTotal produced: %d"
-			+ "\nBatch size: %d logs"
-			+ "\nProduction interval: %.0f seconds"
-			+ "\n\nStatus: %s"
-			+ "\nProduction check in: %.1f seconds"
+			+ "\nOn train: %d / %d"
+			+ "\n\nProduction: %s"
+			+ "\nFreight train: %s"
 		) % [
 			forest_stock,
 			MAX_FOREST_STOCK,
 			logs_produced,
-			LOGS_PER_BATCH,
-			LOG_PRODUCTION_INTERVAL,
+			freight_train.cargo,
+			FreightTrain.CAPACITY,
 			production_status,
-			time_remaining
+			train_status
 		]
 	else:
 		station_title.text = "Cargo terminal"
 
 		station_details.text = (
 			"Accepts: logs"
-			+ "\nSource: forest"
-			+ "\n\nFreight deliveries will earn income here."
-			+ "\n\nFreight train service is the next development step."
-		)
+			+ "\nPayment: £%d per log"
+			+ "\n\nLogs delivered: %d"
+			+ "\nFreight income: £%d"
+			+ "\nOn train: %d / %d"
+			+ "\n\nFreight train: %s"
+		) % [
+			LOG_DELIVERY_PRICE,
+			logs_delivered,
+			freight_income,
+			freight_train.cargo,
+			FreightTrain.CAPACITY,
+			train_status
+		]
+		
 func _setup_camera_keys() -> void:
 	_add_camera_key(&"camera_up", KEY_W)
 	_add_camera_key(&"camera_up", KEY_UP)
@@ -1840,3 +1891,55 @@ func _move_camera_with_keyboard(delta: float) -> void:
 
 	camera.position += direction * speed * delta / camera.zoom.x
 	camera.force_update_scroll()
+func _setup_freight_train() -> void:
+	freight_train = FreightTrain.new()
+	freight_train.name = "FreightTrain"
+	freight_train.home_position = _cell_center(FOREST_SITE)
+	freight_train.position = freight_train.home_position
+	freight_train.delivered.connect(_on_logs_delivered)
+
+	add_child(freight_train)
+	_refresh_freight_route(route_cells)
+
+
+func _find_freight_route(
+	track_data: Dictionary,
+	passenger_cells: Array[Vector2i]
+) -> Array[Vector2i]:
+	var candidate: Array[Vector2i] = RailRouter.find_route(
+		track_data,
+		FOREST_SITE,
+		CARGO_TERMINAL
+	)
+
+	var empty_route: Array[Vector2i] = []
+
+	# Keep services separate until we introduce signals.
+	for cell in candidate:
+		if passenger_cells.has(cell):
+			return empty_route
+
+		if cell == STATION_A or cell == STATION_B:
+			return empty_route
+
+	return candidate
+
+
+func _refresh_freight_route(passenger_cells: Array[Vector2i]) -> void:
+	if freight_train == null:
+		return
+
+	var cells: Array[Vector2i] = _find_freight_route(
+		tracks,
+		passenger_cells
+	)
+
+	freight_train.set_route(cells, float(TILE_SIZE))
+
+
+func _on_logs_delivered(amount: int) -> void:
+	var payment: int = amount * LOG_DELIVERY_PRICE
+
+	logs_delivered += amount
+	freight_income += payment
+	money += payment
