@@ -1,7 +1,6 @@
 extends Node2D
 
 const TILE_SIZE: int = 32
-const BUILD_START_ROW: int = 5
 
 const GRID_COLOR: Color = Color(0.18, 0.23, 0.25)
 const SLEEPER_COLOR: Color = Color(0.43, 0.29, 0.17)
@@ -44,6 +43,13 @@ const SAVE_FIELDS: Array[String] = [
 	"train_needs_boarding",
 	"paused"
 ]
+const MAP_WIDTH: int = 80
+const MAP_HEIGHT: int = 50
+
+const MIN_ZOOM: float = 0.5
+const MAX_ZOOM: float = 3.0
+const ZOOM_STEP: float = 1.15
+const SAVE_BACKUP_PATH: String = "user://trainz_save.backup.json"
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -80,6 +86,7 @@ var route_distance: float = 0.0
 var train_heading: float = 0.0
 # Empty means straight track. Other values connect two compass directions.
 var selected_curve: String = ""
+var is_panning: bool = false
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -89,7 +96,9 @@ var selected_curve: String = ""
 @onready var save_button: Button = $Interface/Toolbar/SaveButton
 @onready var load_button: Button = $Interface/Toolbar/LoadButton
 @onready var folder_button: Button = $Interface/Toolbar/FolderButton
-
+@onready var camera: Camera2D = $Camera2D
+@onready var header_background: ColorRect = $Interface/HeaderBackground
+@onready var backup_button: Button = $Interface/Toolbar/BackupButton
 
 func _ready() -> void:
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
@@ -102,6 +111,7 @@ func _ready() -> void:
 	_update_instructions()
 	queue_redraw()
 	_setup_toolbar()
+	_reset_camera()
 
 
 func _process(delta: float) -> void:
@@ -125,14 +135,12 @@ func _process(delta: float) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
-			if event.keycode == KEY_F6:
-				_save_game()
+			if event.keycode == KEY_HOME:
+				is_dragging = false
+				is_panning = false
+				_reset_camera()
 				return
-
-			if event.keycode == KEY_F9:
-				_load_game()
-				return
-
+			
 			if event.keycode == KEY_ESCAPE:
 				is_dragging = false
 
@@ -255,15 +263,11 @@ func _mouse_to_cell() -> Vector2i:
 
 
 func _can_build_at(cell: Vector2i) -> bool:
-	var viewport_size: Vector2 = get_viewport_rect().size
-	var columns: int = int(floor(viewport_size.x / TILE_SIZE))
-	var rows: int = int(floor(viewport_size.y / TILE_SIZE))
-
 	return (
 		cell.x >= 0
-		and cell.x < columns
-		and cell.y >= BUILD_START_ROW
-		and cell.y < rows
+		and cell.x < MAP_WIDTH
+		and cell.y >= 0
+		and cell.y < MAP_HEIGHT
 	)
 
 
@@ -303,9 +307,16 @@ func _update_instructions() -> void:
 	instructions.text = (
 		"Left-drag: build | Right-click: remove/cancel"
 		+ " | T: straight/curve | R: rotate"
-		+ " | Space: pause | Esc: cancel | F6/F9: save/load"
-		+ "\n%s | Build: £%d%s | %s"
-		% [direction, preview_cost, affordability, status]
+		+ " | Space: pause | Esc: cancel"
+		+ "\n%s | Cell: %d,%d | Build: £%d%s | %s"
+		% [
+			direction,
+			hovered_cell.x,
+			hovered_cell.y,
+			preview_cost,
+			affordability,
+			status
+		]
 		+ "\nWaiting: A %d / B %d | Onboard: %d/%d | Delivered: %d"
 		% [
 			waiting_at_a,
@@ -359,28 +370,40 @@ func _draw() -> void:
 
 
 func _draw_grid() -> void:
-	var viewport_size: Vector2 = get_viewport_rect().size
-	var columns: int = int(ceil(viewport_size.x / TILE_SIZE))
-	var rows: int = int(ceil(viewport_size.y / TILE_SIZE))
-	var top: float = float(BUILD_START_ROW * TILE_SIZE)
+	var map_size := Vector2(
+		MAP_WIDTH * TILE_SIZE,
+		MAP_HEIGHT * TILE_SIZE
+	)
 
-	for column in range(columns + 1):
+	draw_rect(
+		Rect2(Vector2.ZERO, map_size),
+		Color(0.10, 0.15, 0.13)
+	)
+
+	for column in range(MAP_WIDTH + 1):
 		var x: float = float(column * TILE_SIZE)
 
 		draw_line(
-			Vector2(x, top),
-			Vector2(x, viewport_size.y),
+			Vector2(x, 0.0),
+			Vector2(x, map_size.y),
 			GRID_COLOR
 		)
 
-	for row in range(BUILD_START_ROW, rows + 1):
+	for row in range(MAP_HEIGHT + 1):
 		var y: float = float(row * TILE_SIZE)
 
 		draw_line(
 			Vector2(0.0, y),
-			Vector2(viewport_size.x, y),
+			Vector2(map_size.x, y),
 			GRID_COLOR
 		)
+
+	draw_rect(
+		Rect2(Vector2.ZERO, map_size),
+		Color(0.45, 0.55, 0.48),
+		false,
+		2.0
+	)
 
 
 func _draw_track(
@@ -661,12 +684,11 @@ func _save_game() -> void:
 		"state": state
 	}
 
-	# Write a temporary file first to protect the previous save
-	# if writing fails.
+	# Prepare the new save before touching the existing one.
 	var file := FileAccess.open(SAVE_TEMP_PATH, FileAccess.WRITE)
 
 	if file == null:
-		_show_notice("Could not open the save file.")
+		_show_notice("Could not open the temporary save file.")
 		return
 
 	file.store_string(JSON.stringify(data, "\t"))
@@ -679,6 +701,18 @@ func _save_game() -> void:
 		_show_notice("Saving failed while writing the file.")
 		return
 
+	# Preserve the previous manual save.
+	if FileAccess.file_exists(SAVE_PATH):
+		var backup_error: Error = DirAccess.copy_absolute(
+			ProjectSettings.globalize_path(SAVE_PATH),
+			ProjectSettings.globalize_path(SAVE_BACKUP_PATH)
+		)
+
+		if backup_error != OK:
+			_show_notice("Could not create a backup. Save cancelled.")
+			return
+
+	# Replace the main save only after writing and backup succeed.
 	var rename_error: Error = DirAccess.rename_absolute(
 		ProjectSettings.globalize_path(SAVE_TEMP_PATH),
 		ProjectSettings.globalize_path(SAVE_PATH)
@@ -805,7 +839,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 		if x < 0 or x > 10000:
 			return false
 
-		if y < BUILD_START_ROW or y > 10000:
+		if y < 0 or y > 10000:
 			return false
 
 		var cell := Vector2i(int(x), int(y))
@@ -825,12 +859,15 @@ func _is_valid_save(data: Dictionary) -> bool:
 
 	return true
 	
-func _load_game() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
-		_show_notice("No saved game yet. Press F6 to save.")
+func _load_game(save_path: String = SAVE_PATH) -> void:
+	if not FileAccess.file_exists(save_path):
+		if save_path == SAVE_BACKUP_PATH:
+			_show_notice("No previous save yet. Save twice to create one.")
+		else:
+			_show_notice("No saved game yet. Click Save first.")
 		return
 
-	var file := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	var file := FileAccess.open(save_path, FileAccess.READ)
 
 	if file == null:
 		_show_notice("Could not open the saved game.")
@@ -917,7 +954,10 @@ func _load_game() -> void:
 	is_dragging = false
 
 	_update_train_transform()
-	_show_notice("Game loaded.")
+	if save_path == SAVE_BACKUP_PATH:
+		_show_notice("Previous save loaded.")
+	else:
+		_show_notice("Game loaded.")
 	_update_instructions()
 	queue_redraw()
 
@@ -1029,8 +1069,8 @@ func _setup_toolbar() -> void:
 	curve_button.tooltip_text = "Click to place a curved track."
 	rotate_button.tooltip_text = "Rotate the selected piece. Shortcut: R"
 	pause_button.tooltip_text = "Pause or resume. Shortcut: Space"
-	save_button.tooltip_text = "Save your current railway. Shortcut: F6"
-	load_button.tooltip_text = "Restore your last save. Shortcut: F9"
+	save_button.tooltip_text = "Save your current railway."
+	load_button.tooltip_text = "Restore your latest saved railway."
 	folder_button.tooltip_text = "Open the folder containing your saved game."
 
 	# Keep Space available for pausing after clicking a button.
@@ -1044,6 +1084,12 @@ func _setup_toolbar() -> void:
 		folder_button
 	]:
 		button.focus_mode = Control.FOCUS_NONE
+		backup_button.pressed.connect(
+		_load_game.bind(SAVE_BACKUP_PATH)
+	)
+
+	backup_button.tooltip_text = "Restore the version before your latest save."
+	backup_button.focus_mode = Control.FOCUS_NONE
 
 	_update_toolbar()
 
@@ -1107,18 +1153,80 @@ func _update_toolbar() -> void:
 	rotate_button.disabled = is_dragging
 	save_button.disabled = is_dragging
 	load_button.disabled = is_dragging
-	
+	backup_button.disabled = is_dragging
 func _input(event: InputEvent) -> void:
-	if not is_dragging:
-		return
-
 	if event is InputEventMouseButton:
-		if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
-			var toolbar: HBoxContainer = $Interface/Toolbar
-
-			if toolbar.get_global_rect().has_point(
-				toolbar.get_global_mouse_position()
-			):
-				is_dragging = false
+		# Release the middle button anywhere to stop panning.
+		if event.button_index == MOUSE_BUTTON_MIDDLE:
+			if event.pressed:
+				if not _mouse_is_over_header():
+					is_panning = true
+					is_dragging = false
+					get_viewport().set_input_as_handled()
+			else:
+				is_panning = false
 				get_viewport().set_input_as_handled()
-				queue_redraw()
+
+			return
+
+		# Cancel construction if its drag ends over the interface.
+		if (
+			event.button_index == MOUSE_BUTTON_LEFT
+			and not event.pressed
+			and is_dragging
+			and _mouse_is_over_header()
+		):
+			is_dragging = false
+			get_viewport().set_input_as_handled()
+			return
+
+		# Avoid building while moving the camera.
+		if is_panning:
+			get_viewport().set_input_as_handled()
+			return
+
+		if event.pressed and not _mouse_is_over_header():
+			if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+				if not is_dragging:
+					_zoom_camera(ZOOM_STEP)
+
+				get_viewport().set_input_as_handled()
+
+			elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+				if not is_dragging:
+					_zoom_camera(1.0 / ZOOM_STEP)
+
+				get_viewport().set_input_as_handled()
+
+	if event is InputEventMouseMotion and is_panning:
+		camera.position -= event.relative / camera.zoom.x
+		camera.force_update_scroll()
+		get_viewport().set_input_as_handled()
+func _reset_camera() -> void:
+	camera.zoom = Vector2.ONE
+	camera.position = get_viewport_rect().size / 2.0
+	camera.force_update_scroll()
+
+
+func _zoom_camera(factor: float) -> void:
+	var mouse_before: Vector2 = get_global_mouse_position()
+
+	var new_zoom: float = clampf(
+		camera.zoom.x * factor,
+		MIN_ZOOM,
+		MAX_ZOOM
+	)
+
+	camera.zoom = Vector2(new_zoom, new_zoom)
+	camera.force_update_scroll()
+
+	# Keep the map location beneath the cursor in the same place.
+	var mouse_after: Vector2 = get_global_mouse_position()
+	camera.position += mouse_before - mouse_after
+	camera.force_update_scroll()
+
+
+func _mouse_is_over_header() -> bool:
+	return header_background.get_global_rect().has_point(
+		header_background.get_global_mouse_position()
+	)

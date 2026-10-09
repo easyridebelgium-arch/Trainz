@@ -5,7 +5,16 @@
 [node name="Main" type="Node2D" unique_id=1690144118]
 script = ExtResource("1_main")
 
+[node name="Camera2D" type="Camera2D" parent="." unique_id=1739231926]
+
 [node name="Interface" type="CanvasLayer" parent="." unique_id=1671317200]
+
+[node name="HeaderBackground" type="ColorRect" parent="Interface" unique_id=1110824870]
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 160.0
+grow_horizontal = 2
+color = Color(0.09019608, 0.1254902, 0.15294118, 1)
 
 [node name="Title" type="Label" parent="Interface" unique_id=418163251]
 offset_left = 24.0
@@ -59,3 +68,7 @@ text = "Load"
 [node name="FolderButton" type="Button" parent="Interface/Toolbar" unique_id=1838455707]
 layout_mode = 2
 text = "Save Folder"
+
+[node name="BackupButton" type="Button" parent="Interface/Toolbar" unique_id=723963803]
+layout_mode = 2
+text = "Previous Save"
