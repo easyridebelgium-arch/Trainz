@@ -43,7 +43,10 @@ const SAVE_FIELDS: Array[String] = [
 	"train_needs_boarding",
 	"paused",
 	"capacity_upgrade_level",
-	"speed_upgrade_level"
+	"speed_upgrade_level",
+	"forest_stock",
+	"logs_produced",
+	"log_production_timer"
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
@@ -60,6 +63,12 @@ const BASE_SPEED_UPGRADE_PRICE: int = 200
 const CAPACITY_PER_UPGRADE: int = 10
 const SPEED_PER_UPGRADE: float = 20.0
 
+const FOREST_SITE: Vector2i = Vector2i(8, 24)
+const CARGO_TERMINAL: Vector2i = Vector2i(28, 24)
+
+const LOG_PRODUCTION_INTERVAL: float = 10.0
+const LOGS_PER_BATCH: int = 5
+const MAX_FOREST_STOCK: int = 100
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -108,6 +117,9 @@ var speed_upgrade_level: int = 0
 
 var capacity_upgrade_button: Button
 var speed_upgrade_button: Button
+var forest_stock: int = 0
+var logs_produced: int = 0
+var log_production_timer: float = 0.0
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -128,6 +140,8 @@ func _ready() -> void:
 	# Each station includes a horizontal platform track.
 	tracks[STATION_A] = false
 	tracks[STATION_B] = false
+	tracks[FOREST_SITE] = false
+	tracks[CARGO_TERMINAL] = false
 
 	train_position = _cell_center(STATION_A)
 	_update_instructions()
@@ -146,6 +160,7 @@ func _process(delta: float) -> void:
 
 	if not paused:
 		_generate_passengers(delta)
+		_produce_logs(delta)
 
 		if route_connected:
 			_move_train(delta)
@@ -212,7 +227,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if not _can_build_at(cell):
 				return
 
-			if cell == STATION_A or cell == STATION_B:
+			if cell in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
 				return
 
 			if tracks.erase(cell):
@@ -308,7 +323,7 @@ func _is_inside_map(cell: Vector2i) -> bool:
 
 
 func _is_station_space(cell: Vector2i) -> bool:
-	for station in [STATION_A, STATION_B]:
+	for station in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
 		var inside_columns: bool = (
 			cell.x >= station.x - 1
 			and cell.x <= station.x + 1
@@ -407,6 +422,8 @@ func _draw() -> void:
 
 	_draw_station(STATION_A, "Station A")
 	_draw_station(STATION_B, "Station B")
+	_draw_station(FOREST_SITE, "Forest")
+	_draw_station(CARGO_TERMINAL, "Terminal")
 
 	if inspect_mode:
 		if selected_station != Vector2i(-1, -1):
@@ -780,7 +797,7 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 5,
+		"version": 6,
 		"tracks": saved_tracks,
 		"route_distance": route_distance,
 		"state": state
@@ -844,7 +861,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 	if version_number != floor(version_number):
 		return false
 
-	if version_number < 1.0 or version_number > 5.0:
+	if version_number < 1.0 or version_number > 6.0:
 		return false
 
 	var version: int = int(version_number)
@@ -927,6 +944,14 @@ func _is_valid_save(data: Dictionary) -> bool:
 
 	if float(state["operating_timer"]) >= 1.0:
 		return false
+	if int(state["forest_stock"]) > MAX_FOREST_STOCK:
+		return false
+
+	if int(state["logs_produced"]) < int(state["forest_stock"]):
+		return false
+
+	if float(state["log_production_timer"]) >= LOG_PRODUCTION_INTERVAL:
+		return false
 
 	var checked_tracks: Dictionary = {}
 
@@ -1003,7 +1028,7 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 		return
 
 	var data: Dictionary = parser.data
-	# Convert earlier upgrade formats before validating the save.
+	# Supply fields introduced after earlier save versions.
 	if _is_valid_number(data.get("version")):
 		var old_version: float = float(data["version"])
 
@@ -1015,13 +1040,17 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 				old_state["speed_upgrade_level"] = 0
 
 			elif old_version == 4.0:
-				# A combined upgrade granted both improvements.
 				var combined_level: Variant = old_state.get(
 					"train_upgrade_level"
 				)
 
 				old_state["capacity_upgrade_level"] = combined_level
 				old_state["speed_upgrade_level"] = combined_level
+
+			if old_version >= 1.0 and old_version <= 5.0:
+				old_state["forest_stock"] = 0
+				old_state["logs_produced"] = 0
+				old_state["log_production_timer"] = 0.0
 	if not _is_valid_save(data):
 		_show_notice("The save file is damaged or incompatible.")
 		return
@@ -1469,7 +1498,7 @@ func _close_station_inspector() -> void:
 
 
 func _inspect_station_at(cell: Vector2i) -> void:
-	for station in [STATION_A, STATION_B]:
+	for station in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
 		var inside_station_grounds: bool = (
 			cell.x >= station.x - 1
 			and cell.x <= station.x + 1
@@ -1489,6 +1518,13 @@ func _inspect_station_at(cell: Vector2i) -> void:
 func _update_station_inspector() -> void:
 	if not station_panel.visible:
 		return
+
+	if selected_station == FOREST_SITE or selected_station == CARGO_TERMINAL:
+		_update_freight_inspector()
+		return
+
+	capacity_upgrade_button.show()
+	speed_upgrade_button.show()
 
 	var is_station_a: bool = selected_station == STATION_A
 	var station_name: String = "Station A" if is_station_a else "Station B"
@@ -1611,10 +1647,20 @@ func _draw_build_preview(cell: Vector2i, track_type: Variant) -> void:
 func _remove_station_space_tracks(track_data: Dictionary) -> int:
 	var removed_count: int = 0
 
+	# Clear track from reserved building grounds.
 	for cell in track_data.keys():
 		if _is_station_space(cell):
 			track_data.erase(cell)
 			removed_count += 1
+
+	# Install the new permanent horizontal loading tracks.
+	for facility in [FOREST_SITE, CARGO_TERMINAL]:
+		if track_data.has(facility):
+			if track_data[facility] != false:
+				track_data.erase(facility)
+				removed_count += 1
+
+		track_data[facility] = false
 
 	return removed_count
 func _get_train_capacity() -> int:
@@ -1680,3 +1726,63 @@ func _upgrade_speed() -> void:
 	)
 
 	_update_station_inspector()
+
+func _produce_logs(delta: float) -> void:
+	log_production_timer += delta
+
+	while log_production_timer >= LOG_PRODUCTION_INTERVAL:
+		log_production_timer -= LOG_PRODUCTION_INTERVAL
+
+		var free_storage: int = MAX_FOREST_STOCK - forest_stock
+		var produced: int = mini(LOGS_PER_BATCH, free_storage)
+
+		if produced > 0:
+			forest_stock += produced
+			logs_produced += produced
+
+func _update_freight_inspector() -> void:
+	capacity_upgrade_button.hide()
+	speed_upgrade_button.hide()
+
+	if selected_station == FOREST_SITE:
+		station_title.text = "Forest"
+
+		var production_status: String = "Producing"
+
+		if forest_stock >= MAX_FOREST_STOCK:
+			production_status = "Storage full"
+		elif paused:
+			production_status = "Paused"
+
+		var time_remaining: float = maxf(
+			0.0,
+			LOG_PRODUCTION_INTERVAL - log_production_timer
+		)
+
+		station_details.text = (
+			"Produces: logs"
+			+ "\nDestination: cargo terminal"
+			+ "\n\nStored: %d / %d"
+			+ "\nTotal produced: %d"
+			+ "\nBatch size: %d logs"
+			+ "\nProduction interval: %.0f seconds"
+			+ "\n\nStatus: %s"
+			+ "\nProduction check in: %.1f seconds"
+		) % [
+			forest_stock,
+			MAX_FOREST_STOCK,
+			logs_produced,
+			LOGS_PER_BATCH,
+			LOG_PRODUCTION_INTERVAL,
+			production_status,
+			time_remaining
+		]
+	else:
+		station_title.text = "Cargo terminal"
+
+		station_details.text = (
+			"Accepts: logs"
+			+ "\nSource: forest"
+			+ "\n\nFreight deliveries will earn income here."
+			+ "\n\nFreight train service is the next development step."
+		)
