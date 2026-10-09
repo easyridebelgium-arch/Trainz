@@ -38,6 +38,11 @@ offset_right = 1240.0
 offset_bottom = 52.0
 theme_override_constants/separation = 8
 
+[node name="InspectButton" type="Button" parent="Interface/Toolbar" unique_id=2070052855]
+layout_mode = 2
+toggle_mode = true
+text = "Inspect"
+
 [node name="StraightButton" type="Button" parent="Interface/Toolbar" unique_id=1248762931]
 layout_mode = 2
 toggle_mode = true

@@ -87,6 +87,12 @@ var train_heading: float = 0.0
 # Empty means straight track. Other values connect two compass directions.
 var selected_curve: String = ""
 var is_panning: bool = false
+var inspect_mode: bool = false
+var selected_station: Vector2i = Vector2i(-1, -1)
+
+var station_panel: PanelContainer
+var station_title: Label
+var station_details: Label
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -99,6 +105,7 @@ var is_panning: bool = false
 @onready var camera: Camera2D = $Camera2D
 @onready var header_background: ColorRect = $Interface/HeaderBackground
 @onready var backup_button: Button = $Interface/Toolbar/BackupButton
+@onready var inspect_button: Button = $Interface/Toolbar/InspectButton
 
 func _ready() -> void:
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
@@ -112,6 +119,7 @@ func _ready() -> void:
 	queue_redraw()
 	_setup_toolbar()
 	_reset_camera()
+	_setup_station_inspector()
 
 
 func _process(delta: float) -> void:
@@ -130,8 +138,9 @@ func _process(delta: float) -> void:
 
 	_update_instructions()
 	_update_toolbar()
+	_update_station_inspector()
 	queue_redraw()
-
+	
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if event.pressed and not event.echo:
@@ -155,11 +164,20 @@ func _unhandled_input(event: InputEvent) -> void:
 
 			if event.keycode == KEY_SPACE:
 				_toggle_pause()
+			
+			if event.keycode == KEY_I:
+				_toggle_inspect_mode()
+				return
 
 	if event is InputEventMouseButton:
 		var cell: Vector2i = _mouse_to_cell()
 
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			if inspect_mode:
+				if event.pressed:
+					_inspect_station_at(cell)
+				return
+			
 			if event.pressed:
 				if _can_build_at(cell):
 					drag_start = cell
@@ -168,6 +186,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				_finish_track_drag(cell)
 
 		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+			if inspect_mode:
+				_close_station_inspector()
+				return
 			# Right-click cancels an active construction preview.
 			if is_dragging:
 				is_dragging = false
@@ -273,6 +294,8 @@ func _can_build_at(cell: Vector2i) -> bool:
 
 func _update_instructions() -> void:
 	var direction: String = "Vertical" if placing_vertical else "Horizontal"
+	if inspect_mode:
+		direction = "Inspect: click a station track"
 
 	if not selected_curve.is_empty():
 		direction = "Curve " + selected_curve
@@ -348,26 +371,39 @@ func _draw() -> void:
 	_draw_station(STATION_A, "Station A")
 	_draw_station(STATION_B, "Station B")
 
-	if is_dragging:
-		var track_type: Variant = _drag_is_vertical(hovered_cell)
+	if inspect_mode:
+		if selected_station != Vector2i(-1, -1):
+			var selection_rect := Rect2(
+				Vector2(selected_station) * TILE_SIZE,
+				Vector2(TILE_SIZE, TILE_SIZE)
+			)
 
-		if not selected_curve.is_empty():
-			track_type = selected_curve
-
-		for cell in _get_drag_cells(hovered_cell):
-			if not tracks.has(cell):
-				_draw_track(cell, track_type, true)
+			draw_rect(
+				selection_rect.grow(3.0),
+				Color(1.0, 0.85, 0.25),
+				false,
+				2.0
+			)
 	else:
-		if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
-			var track_type: Variant = placing_vertical
+		if is_dragging:
+			var track_type: Variant = _drag_is_vertical(hovered_cell)
 
 			if not selected_curve.is_empty():
 				track_type = selected_curve
 
-			_draw_track(hovered_cell, track_type, true)
+			for cell in _get_drag_cells(hovered_cell):
+				if not tracks.has(cell):
+					_draw_track(cell, track_type, true)
+		else:
+			if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
+				var track_type: Variant = placing_vertical
+
+				if not selected_curve.is_empty():
+					track_type = selected_curve
+
+				_draw_track(hovered_cell, track_type, true)
 
 	_draw_train()
-
 
 func _draw_grid() -> void:
 	var map_size := Vector2(
@@ -647,6 +683,8 @@ func _show_notice(message: String) -> void:
 	notice_remaining = 4.0
 	
 func _get_preview_cost() -> int:
+	if inspect_mode:
+		return 0
 	var tile_count: int = 0
 
 	if is_dragging:
@@ -1064,6 +1102,9 @@ func _setup_toolbar() -> void:
 	save_button.pressed.connect(_save_game)
 	load_button.pressed.connect(_load_game)
 	folder_button.pressed.connect(_open_save_folder)
+	inspect_button.pressed.connect(_toggle_inspect_mode)
+	inspect_button.tooltip_text = "Inspect a station. Shortcut: I"
+	inspect_button.focus_mode = Control.FOCUS_NONE
 
 	straight_button.tooltip_text = "Drag to build straight track."
 	curve_button.tooltip_text = "Click to place a curved track."
@@ -1095,12 +1136,16 @@ func _setup_toolbar() -> void:
 
 
 func _select_straight_track() -> void:
+	inspect_mode = false
+	_close_station_inspector()
 	is_dragging = false
 	selected_curve = ""
 	_update_toolbar()
 
 
 func _select_curved_track() -> void:
+	inspect_mode = false
+	_close_station_inspector()
 	is_dragging = false
 
 	if selected_curve.is_empty():
@@ -1110,7 +1155,7 @@ func _select_curved_track() -> void:
 
 
 func _rotate_selected_track() -> void:
-	if is_dragging:
+	if is_dragging or inspect_mode:
 		return
 
 	if selected_curve.is_empty():
@@ -1144,13 +1189,20 @@ func _open_save_folder() -> void:
 
 
 func _update_toolbar() -> void:
-	straight_button.set_pressed_no_signal(selected_curve.is_empty())
-	curve_button.set_pressed_no_signal(not selected_curve.is_empty())
+	inspect_button.set_pressed_no_signal(inspect_mode)
+
+	straight_button.set_pressed_no_signal(
+		not inspect_mode and selected_curve.is_empty()
+	)
+
+	curve_button.set_pressed_no_signal(
+		not inspect_mode and not selected_curve.is_empty()
+	)
 	pause_button.set_pressed_no_signal(paused)
 
 	pause_button.text = "Resume" if paused else "Pause"
 
-	rotate_button.disabled = is_dragging
+	rotate_button.disabled = is_dragging or inspect_mode
 	save_button.disabled = is_dragging
 	load_button.disabled = is_dragging
 	backup_button.disabled = is_dragging
@@ -1159,7 +1211,7 @@ func _input(event: InputEvent) -> void:
 		# Release the middle button anywhere to stop panning.
 		if event.button_index == MOUSE_BUTTON_MIDDLE:
 			if event.pressed:
-				if not _mouse_is_over_header():
+				if not _mouse_is_over_interface():
 					is_panning = true
 					is_dragging = false
 					get_viewport().set_input_as_handled()
@@ -1174,7 +1226,7 @@ func _input(event: InputEvent) -> void:
 			event.button_index == MOUSE_BUTTON_LEFT
 			and not event.pressed
 			and is_dragging
-			and _mouse_is_over_header()
+			and _mouse_is_over_interface()
 		):
 			is_dragging = false
 			get_viewport().set_input_as_handled()
@@ -1185,7 +1237,7 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 			return
 
-		if event.pressed and not _mouse_is_over_header():
+		if event.pressed and not _mouse_is_over_interface():
 			if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 				if not is_dragging:
 					_zoom_camera(ZOOM_STEP)
@@ -1226,7 +1278,117 @@ func _zoom_camera(factor: float) -> void:
 	camera.force_update_scroll()
 
 
-func _mouse_is_over_header() -> bool:
-	return header_background.get_global_rect().has_point(
-		header_background.get_global_mouse_position()
+func _mouse_is_over_interface() -> bool:
+	return get_viewport().gui_get_hovered_control() != null
+func _setup_station_inspector() -> void:
+	station_panel = PanelContainer.new()
+	station_panel.name = "StationInspector"
+	$Interface.add_child(station_panel)
+
+	station_panel.set_anchors_and_offsets_preset(
+		Control.PRESET_TOP_RIGHT
 	)
+	station_panel.offset_left = -304.0
+	station_panel.offset_right = -16.0
+	station_panel.offset_top = 176.0
+	station_panel.offset_bottom = 420.0
+	station_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 16)
+	margin.add_theme_constant_override("margin_right", 16)
+	margin.add_theme_constant_override("margin_top", 16)
+	margin.add_theme_constant_override("margin_bottom", 16)
+	station_panel.add_child(margin)
+
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 12)
+	margin.add_child(content)
+
+	station_title = Label.new()
+	station_title.add_theme_font_size_override("font_size", 22)
+	content.add_child(station_title)
+
+	station_details = Label.new()
+	station_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(station_details)
+
+	var close_button := Button.new()
+	close_button.text = "Close"
+	close_button.focus_mode = Control.FOCUS_NONE
+	close_button.pressed.connect(_close_station_inspector)
+	content.add_child(close_button)
+
+	station_panel.hide()
+
+
+func _toggle_inspect_mode() -> void:
+	inspect_mode = not inspect_mode
+	is_dragging = false
+
+	if not inspect_mode:
+		station_panel.hide()
+		selected_station = Vector2i(-1, -1)
+
+	_update_toolbar()
+
+
+func _close_station_inspector() -> void:
+	station_panel.hide()
+	selected_station = Vector2i(-1, -1)
+
+
+func _inspect_station_at(cell: Vector2i) -> void:
+	if cell != STATION_A and cell != STATION_B:
+		_close_station_inspector()
+		return
+
+	selected_station = cell
+	station_panel.show()
+	_update_station_inspector()
+
+
+func _update_station_inspector() -> void:
+	if not station_panel.visible:
+		return
+
+	var is_station_a: bool = selected_station == STATION_A
+	var station_name: String = "Station A" if is_station_a else "Station B"
+	var destination_name: String = "Station B" if is_station_a else "Station A"
+
+	var waiting: int = waiting_at_a if is_station_a else waiting_at_b
+	var incoming: int = 0
+
+	if route_connected:
+		if is_station_a and not travelling_to_b:
+			incoming = passengers_on_train
+		elif not is_station_a and travelling_to_b:
+			incoming = passengers_on_train
+
+	var train_at_station: bool = (
+		train_position.distance_to(_cell_center(selected_station)) < 0.5
+	)
+
+	var service_status: String = "No connected service"
+
+	if route_connected:
+		service_status = "Service connected"
+
+	if train_at_station:
+		service_status += "\nTrain at platform"
+
+	station_title.text = station_name
+
+	station_details.text = (
+		"Destination: %s"
+		+ "\n\nWaiting passengers: %d"
+		+ "\nIncoming passengers: %d"
+		+ "\nTrain capacity: %d"
+		+ "\n\n%s"
+	) % [
+		destination_name,
+		waiting,
+		incoming,
+		TRAIN_CAPACITY,
+		service_status
+	]
