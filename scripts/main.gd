@@ -75,6 +75,7 @@ const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
 const SAVE_VERSION: int = 10
+const MAX_CONSTRUCTION_HISTORY: int = 100
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -133,6 +134,12 @@ var freight_operating_cost: int = 0
 var freight_rule_label: Label
 var freight_rule_option: OptionButton
 
+var construction_undo: Array[Dictionary] = []
+var construction_redo: Array[Dictionary] = []
+
+var undo_button: Button
+var redo_button: Button
+
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
 @onready var curve_button: Button = $Interface/Toolbar/CurveButton
@@ -163,6 +170,7 @@ func _ready() -> void:
 	_setup_station_inspector()
 	_setup_camera_keys()
 	_setup_freight_train()
+	_setup_history_controls()
 
 func _process(delta: float) -> void:
 	_move_camera_with_keyboard(delta)
@@ -184,6 +192,7 @@ func _process(delta: float) -> void:
 	_update_instructions()
 	_update_toolbar()
 	_update_station_inspector()
+	_update_history_controls()
 	queue_redraw()
 	
 func _unhandled_input(event: InputEvent) -> void:
@@ -245,10 +254,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			if cell in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
 				return
 
-			if tracks.erase(cell):
-				money += TRACK_REFUND
-				_show_notice("Track removed. Refunded £%d." % TRACK_REFUND)
-				_check_route()
+			_remove_track_with_history(cell)
 
 
 func _check_route() -> void:
@@ -709,14 +715,28 @@ func _finish_track_drag(end_cell: Vector2i) -> void:
 		queue_redraw()
 		return
 
+	var before: Dictionary = {}
+	var after: Dictionary = {}
+
 	for cell in new_cells:
+		before[cell] = null
+
 		if selected_curve.is_empty():
 			tracks[cell] = vertical
 		else:
 			tracks[cell] = selected_curve
 
+		after[cell] = tracks[cell]
+
 	money -= cost
 	total_construction_cost += cost
+
+	_record_construction_change(
+		before,
+		after,
+		-cost,
+		cost
+	)
 
 	_check_route()
 
@@ -1177,6 +1197,8 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	else:
 		_show_notice("Game loaded.")
 	_update_instructions()
+	_clear_construction_history()
+	_update_history_controls()
 	queue_redraw()
 
 func _draw_curve(
@@ -1356,6 +1378,8 @@ func _rotate_selected_track() -> void:
 
 func _toggle_pause() -> void:
 	paused = not paused
+	if not paused:
+		_clear_construction_history()
 	_update_toolbar()
 
 
@@ -2078,3 +2102,175 @@ func _upgrade_freight_speed() -> void:
 	)
 
 	_update_freight_inspector()
+func _record_construction_change(
+	before: Dictionary,
+	after: Dictionary,
+	money_change: int,
+	construction_change: int
+) -> void:
+	if not paused:
+		_clear_construction_history()
+		return
+
+	construction_undo.append({
+		"before": before.duplicate(),
+		"after": after.duplicate(),
+		"money_change": money_change,
+		"construction_change": construction_change
+	})
+
+	if construction_undo.size() > MAX_CONSTRUCTION_HISTORY:
+		construction_undo.pop_front()
+
+	# A new action replaces any previously available redo path.
+	construction_redo.clear()
+
+
+func _clear_construction_history() -> void:
+	construction_undo.clear()
+	construction_redo.clear()
+
+func _remove_track_with_history(cell: Vector2i) -> void:
+	if not tracks.has(cell):
+		return
+
+	var before: Dictionary = {}
+	var after: Dictionary = {}
+
+	before[cell] = tracks[cell]
+	after[cell] = null
+
+	tracks.erase(cell)
+	money += TRACK_REFUND
+
+	_record_construction_change(
+		before,
+		after,
+		TRACK_REFUND,
+		0
+	)
+
+	_show_notice("Track removed. Refunded £%d." % TRACK_REFUND)
+	_check_route()
+	queue_redraw()
+
+func _undo_construction() -> void:
+	if not paused:
+		_show_notice("Pause the game to undo construction.")
+		return
+
+	if is_dragging or construction_undo.is_empty():
+		return
+
+	var change: Dictionary = construction_undo.back()
+
+	if not _apply_construction_history(change, true):
+		return
+
+	construction_undo.pop_back()
+	construction_redo.append(change)
+
+	_show_notice("Construction undone.")
+	_update_history_controls()
+
+
+func _redo_construction() -> void:
+	if not paused:
+		_show_notice("Pause the game to redo construction.")
+		return
+
+	if is_dragging or construction_redo.is_empty():
+		return
+
+	var change: Dictionary = construction_redo.back()
+
+	if not _apply_construction_history(change, false):
+		return
+
+	construction_redo.pop_back()
+	construction_undo.append(change)
+
+	_show_notice("Construction redone.")
+	_update_history_controls()
+
+
+func _apply_construction_history(
+	change: Dictionary,
+	undo: bool
+) -> bool:
+	var multiplier: int = -1 if undo else 1
+	var money_change: int = int(change["money_change"]) * multiplier
+	var construction_change: int = (
+		int(change["construction_change"]) * multiplier
+	)
+
+	# Some actions require money, such as rebuilding a removed track.
+	if money_change < 0 and money + money_change < 0:
+		_show_notice(
+			"Insufficient funds. This action requires £%d."
+			% (-money_change)
+		)
+		return false
+
+	var target: Dictionary
+
+	if undo:
+		target = change["before"]
+	else:
+		target = change["after"]
+
+	for cell in target:
+		if target[cell] == null:
+			tracks.erase(cell)
+		else:
+			tracks[cell] = target[cell]
+
+	money += money_change
+	total_construction_cost += construction_change
+
+	_check_route()
+	queue_redraw()
+
+	return true
+
+func _setup_history_controls() -> void:
+	var controls := HBoxContainer.new()
+	controls.name = "ConstructionHistory"
+	$Interface.add_child(controls)
+
+	controls.set_anchors_and_offsets_preset(
+		Control.PRESET_BOTTOM_LEFT
+	)
+	controls.offset_left = 24.0
+	controls.offset_right = 224.0
+	controls.offset_top = -48.0
+	controls.offset_bottom = -12.0
+	controls.add_theme_constant_override("separation", 8)
+
+	undo_button = Button.new()
+	undo_button.text = "Undo"
+	undo_button.focus_mode = Control.FOCUS_NONE
+	undo_button.pressed.connect(_undo_construction)
+	controls.add_child(undo_button)
+
+	redo_button = Button.new()
+	redo_button.text = "Redo"
+	redo_button.focus_mode = Control.FOCUS_NONE
+	redo_button.pressed.connect(_redo_construction)
+	controls.add_child(redo_button)
+
+	_update_history_controls()
+
+
+func _update_history_controls() -> void:
+	var unavailable: bool = not paused or is_dragging
+
+	undo_button.disabled = unavailable or construction_undo.is_empty()
+	redo_button.disabled = unavailable or construction_redo.is_empty()
+
+	if not paused:
+		undo_button.tooltip_text = "Pause before editing to enable undo."
+		redo_button.tooltip_text = "Construction history clears when play resumes."
+	else:
+		undo_button.tooltip_text = "Undo the latest paused construction action."
+		redo_button.tooltip_text = "Repeat the latest undone construction action."
