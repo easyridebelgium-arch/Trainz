@@ -142,6 +142,9 @@ var undo_button: Button
 var redo_button: Button
 var passenger_service_enabled: bool = true
 var service_button: Button
+var demolition_mode: bool = false
+var demolition_cells: Dictionary = {}
+var demolition_last_cell: Vector2i = Vector2i.ZERO
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -178,6 +181,8 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_move_camera_with_keyboard(delta)
 	hovered_cell = _mouse_to_cell()
+	if is_dragging and demolition_mode:
+		_collect_demolition_cells(hovered_cell)
 
 	# Interface messages expire even while simulation is paused.
 	if notice_remaining > 0.0:
@@ -204,11 +209,18 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.keycode == KEY_HOME:
 				is_dragging = false
 				is_panning = false
+				demolition_cells.clear()
 				_reset_camera()
 				return
-			
+
 			if event.keycode == KEY_ESCAPE:
 				is_dragging = false
+				demolition_cells.clear()
+				return
+
+			if event.keycode == KEY_I:
+				_toggle_inspect_mode()
+				return
 
 			if event.keycode == KEY_T and not is_dragging:
 				if selected_curve.is_empty():
@@ -221,44 +233,56 @@ func _unhandled_input(event: InputEvent) -> void:
 
 			if event.keycode == KEY_SPACE:
 				_toggle_pause()
-			
-			if event.keycode == KEY_I:
-				_toggle_inspect_mode()
-				return
 
 	if event is InputEventMouseButton:
 		var cell: Vector2i = _mouse_to_cell()
 
 		if event.button_index == MOUSE_BUTTON_LEFT:
+			# Left-click cancels an active demolition gesture.
+			if is_dragging and demolition_mode:
+				if event.pressed:
+					is_dragging = false
+					demolition_cells.clear()
+				return
+
 			if inspect_mode:
 				if event.pressed:
 					_inspect_station_at(cell)
 				return
-			
+
 			if event.pressed:
 				if _can_build_at(cell):
+					demolition_mode = false
+					demolition_cells.clear()
 					drag_start = cell
 					is_dragging = true
 			elif is_dragging:
 				_finish_track_drag(cell)
 
-		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			if inspect_mode:
-				_close_station_inspector()
-				return
-			# Right-click cancels an active construction preview.
-			if is_dragging:
-				is_dragging = false
-				return
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed:
+				if inspect_mode:
+					_close_station_inspector()
+					return
 
-			if not _can_build_at(cell):
-				return
+				# Right-click still cancels a construction preview.
+				if is_dragging:
+					is_dragging = false
+					demolition_cells.clear()
+					return
 
-			if cell in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
-				return
+				if not _is_inside_map(cell):
+					return
 
-			_remove_track_with_history(cell)
+				demolition_mode = true
+				is_dragging = true
+				drag_start = cell
+				demolition_last_cell = cell
+				demolition_cells.clear()
+				_collect_demolition_cells(cell)
 
+			elif is_dragging and demolition_mode:
+				_finish_demolition(cell)
 
 func _check_route() -> void:
 	var new_route: Array[Vector2i] = RailRouter.find_route(
@@ -373,6 +397,11 @@ func _update_instructions() -> void:
 	var direction: String = "Vertical" if placing_vertical else "Horizontal"
 	if inspect_mode:
 		direction = "Inspect: click a station track"
+	elif is_dragging and demolition_mode:
+		direction = "Remove %d tracks — refund £%d" % [
+			demolition_cells.size(),
+			demolition_cells.size() * TRACK_REFUND
+		]
 
 	if not selected_curve.is_empty():
 		direction = "Curve " + selected_curve
@@ -397,7 +426,7 @@ func _update_instructions() -> void:
 		affordability = " — insufficient funds"
 
 	instructions.text = (
-		"Left-drag: build | Right-click: remove/cancel"
+		"Left-drag: build | Right-click: remove"
 		+ " | T: straight/curve | R: rotate"
 		+ " | Space: pause | Esc: cancel"
 		+ "\n%s | Cell: %d,%d | Build: £%d%s | %s"
@@ -456,24 +485,28 @@ func _draw() -> void:
 				false,
 				2.0
 			)
+
+	elif is_dragging and demolition_mode:
+		_draw_demolition_preview()
+
+	elif is_dragging:
+		var track_type: Variant = _drag_is_vertical(hovered_cell)
+
+		if not selected_curve.is_empty():
+			track_type = selected_curve
+
+		for cell in _get_drag_cells(hovered_cell):
+			if not tracks.has(cell):
+				_draw_build_preview(cell, track_type)
+
 	else:
-		if is_dragging:
-			var track_type: Variant = _drag_is_vertical(hovered_cell)
+		if _is_inside_map(hovered_cell) and not tracks.has(hovered_cell):
+			var track_type: Variant = placing_vertical
 
 			if not selected_curve.is_empty():
 				track_type = selected_curve
 
-			for cell in _get_drag_cells(hovered_cell):
-				if not tracks.has(cell):
-					_draw_build_preview(cell, track_type)
-		else:
-			if _is_inside_map(hovered_cell) and not tracks.has(hovered_cell):
-				var track_type: Variant = placing_vertical
-
-				if not selected_curve.is_empty():
-					track_type = selected_curve
-
-				_draw_build_preview(hovered_cell, track_type)
+			_draw_build_preview(hovered_cell, track_type)
 
 	_draw_train()
 
@@ -796,7 +829,7 @@ func _show_notice(message: String) -> void:
 	notice_remaining = 4.0
 	
 func _get_preview_cost() -> int:
-	if inspect_mode:
+	if inspect_mode or (is_dragging and demolition_mode):
 		return 0
 	var tile_count: int = 0
 
@@ -1422,12 +1455,16 @@ func _input(event: InputEvent) -> void:
 
 		# Cancel construction if its drag ends over the interface.
 		if (
-			event.button_index == MOUSE_BUTTON_LEFT
+			event.button_index in [
+				MOUSE_BUTTON_LEFT,
+				MOUSE_BUTTON_RIGHT
+			]
 			and not event.pressed
 			and is_dragging
 			and _mouse_is_over_interface()
 		):
 			is_dragging = false
+			demolition_cells.clear()
 			get_viewport().set_input_as_handled()
 			return
 
@@ -2353,3 +2390,103 @@ func _update_service_button() -> void:
 			service_button.tooltip_text = (
 				"Resume service, or cancel a pending withdrawal."
 			)
+func _can_demolish(cell: Vector2i) -> bool:
+	if not _is_inside_map(cell):
+		return false
+
+	if not tracks.has(cell) or _is_station_space(cell):
+		return false
+
+	if cell in [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]:
+		return false
+
+	return true
+
+
+func _collect_demolition_cells(target: Vector2i) -> void:
+	var difference: Vector2i = target - demolition_last_cell
+	var steps: int = maxi(absi(difference.x), absi(difference.y))
+
+	# Fill gaps between samples when the mouse moves quickly.
+	for index in range(steps + 1):
+		var cell: Vector2i = demolition_last_cell
+
+		if steps > 0:
+			var fraction: float = float(index) / float(steps)
+			var point: Vector2 = Vector2(demolition_last_cell).lerp(
+				Vector2(target),
+				fraction
+			)
+
+			cell = Vector2i(point.round())
+
+		if _can_demolish(cell):
+			demolition_cells[cell] = true
+
+	demolition_last_cell = target
+
+
+func _finish_demolition(target: Vector2i) -> void:
+	_collect_demolition_cells(target)
+	is_dragging = false
+
+	var before: Dictionary = {}
+	var after: Dictionary = {}
+
+	for cell in demolition_cells:
+		if _can_demolish(cell):
+			before[cell] = tracks[cell]
+			after[cell] = null
+
+	demolition_cells.clear()
+
+	if before.is_empty():
+		queue_redraw()
+		return
+
+	for cell in before:
+		tracks.erase(cell)
+
+	var refund: int = before.size() * TRACK_REFUND
+	money += refund
+
+	_record_construction_change(
+		before,
+		after,
+		refund,
+		0
+	)
+
+	_check_route()
+
+	_show_notice(
+		"Removed %d tracks. Refunded £%d."
+		% [before.size(), refund]
+	)
+
+	queue_redraw()
+
+
+func _draw_demolition_preview() -> void:
+	for cell in demolition_cells:
+		var origin: Vector2 = Vector2(cell) * TILE_SIZE
+		var color := Color(1.0, 0.3, 0.2)
+
+		draw_rect(
+			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
+			Color(1.0, 0.1, 0.05, 0.3)
+		)
+
+		draw_line(
+			origin + Vector2(5, 5),
+			origin + Vector2(TILE_SIZE - 5, TILE_SIZE - 5),
+			color,
+			2.0
+		)
+
+		draw_line(
+			origin + Vector2(TILE_SIZE - 5, 5),
+			origin + Vector2(5, TILE_SIZE - 5),
+			color,
+			2.0
+		)
