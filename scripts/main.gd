@@ -82,6 +82,13 @@ var train_heading: float = 0.0
 var selected_curve: String = ""
 
 @onready var instructions: Label = $Interface/Instructions
+@onready var straight_button: Button = $Interface/Toolbar/StraightButton
+@onready var curve_button: Button = $Interface/Toolbar/CurveButton
+@onready var rotate_button: Button = $Interface/Toolbar/RotateButton
+@onready var pause_button: Button = $Interface/Toolbar/PauseButton
+@onready var save_button: Button = $Interface/Toolbar/SaveButton
+@onready var load_button: Button = $Interface/Toolbar/LoadButton
+@onready var folder_button: Button = $Interface/Toolbar/FolderButton
 
 
 func _ready() -> void:
@@ -94,6 +101,7 @@ func _ready() -> void:
 	train_position = _cell_center(STATION_A)
 	_update_instructions()
 	queue_redraw()
+	_setup_toolbar()
 
 
 func _process(delta: float) -> void:
@@ -111,8 +119,8 @@ func _process(delta: float) -> void:
 			_charge_operating_cost(delta)
 
 	_update_instructions()
+	_update_toolbar()
 	queue_redraw()
-
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -130,26 +138,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 			if event.keycode == KEY_T and not is_dragging:
 				if selected_curve.is_empty():
-					selected_curve = "NE"
+					_select_curved_track()
 				else:
-					selected_curve = ""
+					_select_straight_track()
 
 			if event.keycode == KEY_R and not is_dragging:
-				if selected_curve.is_empty():
-					placing_vertical = not placing_vertical
-				else:
-					match selected_curve:
-						"NE":
-							selected_curve = "SE"
-						"SE":
-							selected_curve = "SW"
-						"SW":
-							selected_curve = "NW"
-						"NW":
-							selected_curve = "NE"
+				_rotate_selected_track()
 
 			if event.keycode == KEY_SPACE:
-				paused = not paused
+				_toggle_pause()
 
 	if event is InputEventMouseButton:
 		var cell: Vector2i = _mouse_to_cell()
@@ -1019,3 +1016,109 @@ func _update_train_transform() -> void:
 		direction = -direction
 
 	train_heading = direction.angle()
+func _setup_toolbar() -> void:
+	straight_button.pressed.connect(_select_straight_track)
+	curve_button.pressed.connect(_select_curved_track)
+	rotate_button.pressed.connect(_rotate_selected_track)
+	pause_button.pressed.connect(_toggle_pause)
+	save_button.pressed.connect(_save_game)
+	load_button.pressed.connect(_load_game)
+	folder_button.pressed.connect(_open_save_folder)
+
+	straight_button.tooltip_text = "Drag to build straight track."
+	curve_button.tooltip_text = "Click to place a curved track."
+	rotate_button.tooltip_text = "Rotate the selected piece. Shortcut: R"
+	pause_button.tooltip_text = "Pause or resume. Shortcut: Space"
+	save_button.tooltip_text = "Save your current railway. Shortcut: F6"
+	load_button.tooltip_text = "Restore your last save. Shortcut: F9"
+	folder_button.tooltip_text = "Open the folder containing your saved game."
+
+	# Keep Space available for pausing after clicking a button.
+	for button in [
+		straight_button,
+		curve_button,
+		rotate_button,
+		pause_button,
+		save_button,
+		load_button,
+		folder_button
+	]:
+		button.focus_mode = Control.FOCUS_NONE
+
+	_update_toolbar()
+
+
+func _select_straight_track() -> void:
+	is_dragging = false
+	selected_curve = ""
+	_update_toolbar()
+
+
+func _select_curved_track() -> void:
+	is_dragging = false
+
+	if selected_curve.is_empty():
+		selected_curve = "NE"
+
+	_update_toolbar()
+
+
+func _rotate_selected_track() -> void:
+	if is_dragging:
+		return
+
+	if selected_curve.is_empty():
+		placing_vertical = not placing_vertical
+	else:
+		match selected_curve:
+			"NE":
+				selected_curve = "SE"
+			"SE":
+				selected_curve = "SW"
+			"SW":
+				selected_curve = "NW"
+			"NW":
+				selected_curve = "NE"
+
+	_update_toolbar()
+
+
+func _toggle_pause() -> void:
+	paused = not paused
+	_update_toolbar()
+
+
+func _open_save_folder() -> void:
+	var error: Error = OS.shell_open(
+		ProjectSettings.globalize_path("user://")
+	)
+
+	if error != OK:
+		_show_notice("Could not open the save folder.")
+
+
+func _update_toolbar() -> void:
+	straight_button.set_pressed_no_signal(selected_curve.is_empty())
+	curve_button.set_pressed_no_signal(not selected_curve.is_empty())
+	pause_button.set_pressed_no_signal(paused)
+
+	pause_button.text = "Resume" if paused else "Pause"
+
+	rotate_button.disabled = is_dragging
+	save_button.disabled = is_dragging
+	load_button.disabled = is_dragging
+	
+func _input(event: InputEvent) -> void:
+	if not is_dragging:
+		return
+
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+			var toolbar: HBoxContainer = $Interface/Toolbar
+
+			if toolbar.get_global_rect().has_point(
+				toolbar.get_global_mouse_position()
+			):
+				is_dragging = false
+				get_viewport().set_input_as_handled()
+				queue_redraw()
