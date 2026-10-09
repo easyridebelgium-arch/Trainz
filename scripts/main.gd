@@ -75,10 +75,11 @@ const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
-const SAVE_VERSION: int = 11
+const SAVE_VERSION: int = 12
 const MAX_CONSTRUCTION_HISTORY: int = 100
 const TOOLBAR_ICON_SHEET = preload("res://assets/ui/icons/toolbar.svg")
 const NetworkMap = preload("res://scripts/network_map.gd")
+const ScenarioGoals = preload("res://scripts/scenario_goals.gd")
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -150,6 +151,14 @@ var demolition_last_cell: Vector2i = Vector2i.ZERO
 var toolbar_icon_textures: Array[Texture2D] = []
 var network_map: NetworkMap
 var map_button: Button
+var scenario_goals: ScenarioGoals = ScenarioGoals.new()
+
+var objective_panel: PanelContainer
+var objective_heading: Label
+var objective_description: Label
+var objective_progress: ProgressBar
+var objective_details: Label
+var goals_button: Button
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -183,6 +192,7 @@ func _ready() -> void:
 	_setup_freight_train()
 	_setup_history_controls()
 	_setup_network_map()
+	_setup_objective_panel()
 	_setup_modern_ui_theme()
 	_setup_toolbar_icons()
 
@@ -204,12 +214,14 @@ func _process(delta: float) -> void:
 		if _passenger_service_is_active():
 			_move_train(delta)
 			_charge_operating_cost(delta)
+			_check_scenario_objectives()
 
 	_update_instructions()
 	_update_toolbar()
 	_update_station_inspector()
 	_update_history_controls()
 	_update_network_map()
+	_update_objective_panel()
 	queue_redraw()
 	
 func _unhandled_input(event: InputEvent) -> void:
@@ -245,6 +257,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 			if event.keycode == KEY_SPACE:
 				_toggle_pause()
+			if event.keycode == KEY_G:
+				_toggle_objective_panel()
+				return
 
 	if event is InputEventMouseButton:
 		var cell: Vector2i = _mouse_to_cell()
@@ -878,7 +893,8 @@ func _save_game() -> void:
 		"tracks": saved_tracks,
 		"route_distance": route_distance,
 		"state": state,
-		"freight": freight_train.save_state()
+		"freight": freight_train.save_state(),
+		"scenario_stage": scenario_goals.current_index
 	}
 
 	# Prepare the new save before touching the existing one.
@@ -1077,7 +1093,16 @@ func _is_valid_save(data: Dictionary) -> bool:
 
 		if checked_tracks[station] != false:
 			return false
+	if not _is_valid_number(data.get("scenario_stage")):
+		return false
 
+	var saved_stage: float = float(data["scenario_stage"])
+
+	if saved_stage != floor(saved_stage):
+		return false
+
+	if saved_stage < 0.0 or saved_stage > ScenarioGoals.OBJECTIVES.size():
+		return false
 	return true
 	
 func _load_game(save_path: String = SAVE_PATH) -> void:
@@ -1227,6 +1252,7 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	_update_train_transform()
 	freight_train.set_route(loaded_freight_cells, float(TILE_SIZE))
 	freight_train.restore_state(loaded_freight_state)
+	scenario_goals.current_index = int(data["scenario_stage"])
 	if removed_count > 0:
 		_show_notice(
 			"Loaded: removed %d tracks from station space; refunded £%d."
@@ -2612,6 +2638,25 @@ func _setup_modern_ui_theme() -> void:
 		"TooltipLabel",
 		Color("#E8EEF6")
 	)
+	ui_theme.set_stylebox(
+		"background",
+		"ProgressBar",
+		_make_ui_style(
+			Color("#202B3C"),
+			Color("#35445B"),
+			0.0
+		)
+	)
+
+	ui_theme.set_stylebox(
+		"fill",
+		"ProgressBar",
+		_make_ui_style(
+			Color("#3688BE"),
+			Color("#62B5F2"),
+			0.0
+		)
+	)
 
 	# Themes are inherited by the controls inside these UI roots.
 	for child in $Interface.get_children():
@@ -2771,3 +2816,147 @@ func _toggle_network_map() -> void:
 	network_map.cancel_navigation()
 
 	map_button.set_pressed_no_signal(network_map.visible)
+func _scenario_metrics() -> Dictionary:
+	return {
+		"passenger_connected": 1 if route_connected else 0,
+		"passengers_delivered": passengers_delivered,
+		"freight_connected": (
+			0 if freight_train.route_cells.is_empty() else 1
+		),
+		"logs_delivered": logs_delivered
+	}
+
+
+func _check_scenario_objectives() -> void:
+	if scenario_goals.is_complete():
+		return
+
+	var result: Dictionary = scenario_goals.advance(
+		_scenario_metrics()
+	)
+
+	var completed: int = int(result["completed"])
+	var reward: int = int(result["reward"])
+
+	if completed == 0:
+		return
+
+	money += reward
+
+	if scenario_goals.is_complete():
+		_show_notice(
+			"Scenario complete! Final objective reward: £%d." % reward
+		)
+	elif completed == 1:
+		_show_notice("Objective completed! Awarded £%d." % reward)
+	else:
+		_show_notice(
+			"%d objectives completed! Awarded £%d."
+			% [completed, reward]
+		)
+func _setup_objective_panel() -> void:
+	objective_panel = PanelContainer.new()
+	objective_panel.name = "Objectives"
+	$Interface.add_child(objective_panel)
+
+	objective_panel.set_anchors_and_offsets_preset(
+		Control.PRESET_TOP_LEFT
+	)
+
+	objective_panel.offset_left = 24.0
+	objective_panel.offset_right = 344.0
+	objective_panel.offset_top = 176.0
+	objective_panel.offset_bottom = 316.0
+	objective_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+
+	var margin := MarginContainer.new()
+	margin.add_theme_constant_override("margin_left", 12)
+	margin.add_theme_constant_override("margin_right", 12)
+	margin.add_theme_constant_override("margin_top", 12)
+	margin.add_theme_constant_override("margin_bottom", 12)
+	objective_panel.add_child(margin)
+
+	var content := VBoxContainer.new()
+	content.add_theme_constant_override("separation", 8)
+	margin.add_child(content)
+
+	objective_heading = Label.new()
+	objective_heading.add_theme_font_size_override("font_size", 14)
+	content.add_child(objective_heading)
+
+	objective_description = Label.new()
+	objective_description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	content.add_child(objective_description)
+
+	objective_progress = ProgressBar.new()
+	objective_progress.min_value = 0.0
+	objective_progress.show_percentage = false
+	objective_progress.custom_minimum_size = Vector2(0, 16)
+	content.add_child(objective_progress)
+
+	objective_details = Label.new()
+	objective_details.add_theme_font_size_override("font_size", 14)
+	content.add_child(objective_details)
+
+	goals_button = Button.new()
+	goals_button.text = "Goals"
+	goals_button.toggle_mode = true
+	goals_button.button_pressed = true
+	goals_button.focus_mode = Control.FOCUS_NONE
+	goals_button.tooltip_text = "Show or hide scenario objectives — G"
+	goals_button.pressed.connect(_toggle_objective_panel)
+
+	$Interface/ConstructionHistory.add_child(goals_button)
+
+	_update_objective_panel()
+
+
+func _toggle_objective_panel() -> void:
+	objective_panel.visible = not objective_panel.visible
+	goals_button.set_pressed_no_signal(objective_panel.visible)
+
+
+func _update_objective_panel() -> void:
+	if not objective_panel.visible:
+		return
+
+	if scenario_goals.is_complete():
+		objective_heading.text = "SCENARIO COMPLETE"
+		objective_description.text = (
+			"Your passenger and freight services are established."
+			+ "\nKeep expanding your railway."
+		)
+
+		objective_progress.max_value = 1.0
+		objective_progress.value = 1.0
+
+		objective_details.text = "Total objective rewards: £%d" % (
+			scenario_goals.earned_rewards()
+		)
+		return
+
+	var goal: Dictionary = scenario_goals.current_goal()
+	var metrics: Dictionary = _scenario_metrics()
+	var target: int = int(goal["target"])
+
+	var progress: int = clampi(
+		int(metrics.get(goal["metric"], 0)),
+		0,
+		target
+	)
+
+	objective_heading.text = "OBJECTIVE %d OF %d" % [
+		scenario_goals.current_index + 1,
+		ScenarioGoals.OBJECTIVES.size()
+	]
+
+	objective_description.text = goal["title"]
+
+	objective_progress.max_value = float(target)
+	objective_progress.value = float(progress)
+
+	objective_details.text = "%d / %d — Reward: £%d" % [
+		progress,
+		target,
+		int(goal["reward"])
+	]
