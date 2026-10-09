@@ -48,7 +48,8 @@ const SAVE_FIELDS: Array[String] = [
 	"logs_produced",
 	"log_production_timer",
 	"logs_delivered",
-	"freight_income"
+	"freight_income",
+	"freight_operating_cost"
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
@@ -73,6 +74,7 @@ const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
+const SAVE_VERSION: int = 9
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -127,6 +129,9 @@ var log_production_timer: float = 0.0
 var freight_train: FreightTrain
 var logs_delivered: int = 0
 var freight_income: int = 0
+var freight_operating_cost: int = 0
+var freight_rule_label: Label
+var freight_rule_option: OptionButton
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -411,12 +416,13 @@ func _update_instructions() -> void:
 			_get_train_capacity(),
 			passengers_delivered
 		]
-		+ "\nBalance: £%d | Fares: £%d | Construction: £%d | Operations: £%d"
+		+ "\nBalance: £%d | Fares: £%d | Freight: £%d | Build: £%d | Running: £%d"
 		% [
 			money,
 			passengers_delivered * TICKET_PRICE,
+			freight_income,
 			total_construction_cost,
-			total_operating_cost
+			total_operating_cost + freight_operating_cost
 		]
 	)
 
@@ -808,7 +814,7 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 7,
+		"version": SAVE_VERSION,
 		"tracks": saved_tracks,
 		"route_distance": route_distance,
 		"state": state,
@@ -873,7 +879,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 	if version_number != floor(version_number):
 		return false
 
-	if version_number < 1.0 or version_number > 7.0:
+	if version_number != float(SAVE_VERSION):
 		return false
 
 	var version: int = int(version_number)
@@ -1042,33 +1048,13 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 		return
 
 	var data: Dictionary = parser.data
-	# Supply fields introduced after earlier save versions.
-	if _is_valid_number(data.get("version")):
-		var old_version: float = float(data["version"])
+	if not _is_valid_number(data.get("version")):
+		_show_notice("Save file has no valid format version.")
+		return
 
-		if data.get("state") is Dictionary:
-			var old_state: Dictionary = data["state"]
-
-			if old_version >= 1.0 and old_version <= 3.0:
-				old_state["capacity_upgrade_level"] = 0
-				old_state["speed_upgrade_level"] = 0
-
-			elif old_version == 4.0:
-				var combined_level: Variant = old_state.get(
-					"train_upgrade_level"
-				)
-
-				old_state["capacity_upgrade_level"] = combined_level
-				old_state["speed_upgrade_level"] = combined_level
-
-			if old_version >= 1.0 and old_version <= 5.0:
-				old_state["forest_stock"] = 0
-				old_state["logs_produced"] = 0
-				old_state["log_production_timer"] = 0.0
-			if old_version >= 1.0 and old_version <= 6.0:
-				old_state["logs_delivered"] = 0
-				old_state["freight_income"] = 0
-				data["freight"] = FreightTrain.empty_state()
+	if float(data["version"]) != float(SAVE_VERSION):
+		_show_notice("This save is from another development version. Start a new game.")
+		return
 	if not _is_valid_save(data):
 		_show_notice("The save file is damaged or incompatible.")
 		return
@@ -1516,6 +1502,34 @@ func _setup_station_inspector() -> void:
 	speed_upgrade_button.focus_mode = Control.FOCUS_NONE
 	speed_upgrade_button.pressed.connect(_upgrade_speed)
 	content.add_child(speed_upgrade_button)
+	freight_rule_label = Label.new()
+	freight_rule_label.text = "Freight departure rule"
+	content.add_child(freight_rule_label)
+
+	freight_rule_option = OptionButton.new()
+	freight_rule_option.focus_mode = Control.FOCUS_NONE
+
+	freight_rule_option.add_item(
+		"Depart with any logs",
+		FreightTrain.LoadingRule.ANY
+	)
+	freight_rule_option.add_item(
+		"Depart at least half-full",
+		FreightTrain.LoadingRule.HALF
+	)
+	freight_rule_option.add_item(
+		"Depart only when full",
+		FreightTrain.LoadingRule.FULL
+	)
+
+	freight_rule_option.item_selected.connect(
+		_on_freight_rule_selected
+	)
+
+	content.add_child(freight_rule_option)
+
+	freight_rule_label.hide()
+	freight_rule_option.hide()
 	var close_button := Button.new()
 	close_button.text = "Close"
 	close_button.focus_mode = Control.FOCUS_NONE
@@ -1569,6 +1583,8 @@ func _update_station_inspector() -> void:
 
 	capacity_upgrade_button.show()
 	speed_upgrade_button.show()
+	freight_rule_label.hide()
+	freight_rule_option.hide()
 
 	var is_station_a: bool = selected_station == STATION_A
 	var station_name: String = "Station A" if is_station_a else "Station B"
@@ -1787,7 +1803,15 @@ func _produce_logs(delta: float) -> void:
 func _update_freight_inspector() -> void:
 	capacity_upgrade_button.hide()
 	speed_upgrade_button.hide()
+	freight_rule_label.show()
+	freight_rule_option.show()
 
+	var rule_index: int = freight_rule_option.get_item_index(
+		freight_train.loading_rule
+	)
+
+	if rule_index >= 0:
+		freight_rule_option.select(rule_index)
 	var train_status: String = freight_train.status_text()
 
 	if paused:
@@ -1823,19 +1847,27 @@ func _update_freight_inspector() -> void:
 	else:
 		station_title.text = "Cargo terminal"
 
+		var operating_profit: int = freight_income - freight_operating_cost
+
 		station_details.text = (
 			"Accepts: logs"
 			+ "\nPayment: £%d per log"
 			+ "\n\nLogs delivered: %d"
 			+ "\nFreight income: £%d"
-			+ "\nOn train: %d / %d"
+			+ "\nOperating expenses: £%d"
+			+ "\nOperating profit: £%d"
+			+ "\n\nOn train: %d / %d"
+			+ "\nRunning cost: £%d per second"
 			+ "\n\nFreight train: %s"
 		) % [
 			LOG_DELIVERY_PRICE,
 			logs_delivered,
 			freight_income,
+			freight_operating_cost,
+			operating_profit,
 			freight_train.cargo,
 			FreightTrain.CAPACITY,
+			FreightTrain.OPERATING_COST_PER_SECOND,
 			train_status
 		]
 		
@@ -1897,6 +1929,7 @@ func _setup_freight_train() -> void:
 	freight_train.home_position = _cell_center(FOREST_SITE)
 	freight_train.position = freight_train.home_position
 	freight_train.delivered.connect(_on_logs_delivered)
+	freight_train.operating_expense.connect(_on_freight_operating_expense)
 
 	add_child(freight_train)
 	_refresh_freight_route(route_cells)
@@ -1943,3 +1976,11 @@ func _on_logs_delivered(amount: int) -> void:
 	logs_delivered += amount
 	freight_income += payment
 	money += payment
+func _on_freight_operating_expense(amount: int) -> void:
+	money -= amount
+	freight_operating_cost += amount
+func _on_freight_rule_selected(index: int) -> void:
+	freight_train.loading_rule = freight_rule_option.get_item_id(index)
+
+	_show_notice("Freight departure rule updated.")
+	_update_freight_inspector()

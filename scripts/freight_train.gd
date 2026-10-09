@@ -1,13 +1,21 @@
 extends Node2D
 
 signal delivered(amount: int)
-
+signal operating_expense(amount: int)
 const Router = preload("res://scripts/rail_router.gd")
 
 const CAPACITY: int = 20
 const SPEED: float = 60.0
 const STATION_WAIT: float = 2.0
+const OPERATING_COST_PER_SECOND: int = 1
 
+enum LoadingRule {
+	ANY,
+	HALF,
+	FULL
+}
+
+var loading_rule: int = LoadingRule.ANY
 var home_position: Vector2 = Vector2.ZERO
 var cargo: int = 0
 
@@ -17,7 +25,7 @@ var route_path: Curve2D = Curve2D.new()
 var distance_along_route: float = 0.0
 var to_terminal: bool = true
 var dwell: float = 0.0
-
+var operating_timer: float = 0.0
 
 func set_route(cells: Array[Vector2i], tile_size: float) -> void:
 	if cells == route_cells:
@@ -38,6 +46,8 @@ func advance(delta: float, available_logs: int) -> int:
 	if route_cells.is_empty():
 		return 0
 
+	_charge_operating_expenses(delta)
+
 	if dwell > 0.0:
 		dwell = maxf(0.0, dwell - delta)
 		return 0
@@ -49,8 +59,8 @@ func advance(delta: float, available_logs: int) -> int:
 		loaded = mini(CAPACITY - cargo, available_logs)
 		cargo += loaded
 
-		if cargo == 0:
-			return 0
+		if cargo < get_minimum_load():
+			return loaded
 
 	var route_length: float = route_path.get_baked_length()
 	var target: float = route_length if to_terminal else 0.0
@@ -123,8 +133,11 @@ func status_text() -> String:
 		return "Stopped at loading track"
 
 	if to_terminal:
-		if distance_along_route <= 0.001 and cargo == 0:
-			return "Waiting for logs"
+		if distance_along_route <= 0.001 and cargo < get_minimum_load():
+			return "Loading: %d / %d logs required" % [
+				cargo,
+				get_minimum_load()
+			]
 
 		return "Travelling to terminal"
 
@@ -136,7 +149,9 @@ func save_state() -> Dictionary:
 		"cargo": cargo,
 		"distance": distance_along_route,
 		"to_terminal": to_terminal,
-		"dwell": dwell
+		"dwell": dwell,
+		"operating_timer": operating_timer,
+		"loading_rule": loading_rule
 	}
 
 
@@ -149,7 +164,8 @@ func restore_state(state: Dictionary) -> void:
 	)
 	to_terminal = state["to_terminal"]
 	dwell = float(state["dwell"])
-
+	operating_timer = float(state["operating_timer"])
+	loading_rule = int(state["loading_rule"])
 	_update_transform()
 
 
@@ -158,7 +174,9 @@ static func empty_state() -> Dictionary:
 		"cargo": 0,
 		"distance": 0.0,
 		"to_terminal": true,
-		"dwell": 0.0
+		"dwell": 0.0,
+		"operating_timer": 0.0,
+		"loading_rule": LoadingRule.ANY
 	}
 
 
@@ -166,7 +184,13 @@ static func is_valid_state(state: Dictionary, route_length: float) -> bool:
 	if typeof(state.get("to_terminal")) != TYPE_BOOL:
 		return false
 
-	for field in ["cargo", "distance", "dwell"]:
+	for field in [
+		"cargo",
+		"distance",
+		"dwell",
+		"operating_timer",
+		"loading_rule"
+	]:
 		var value: Variant = state.get(field)
 
 		if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
@@ -187,5 +211,28 @@ static func is_valid_state(state: Dictionary, route_length: float) -> bool:
 
 	if float(state["dwell"]) > STATION_WAIT:
 		return false
+	if float(state["operating_timer"]) >= 1.0:
+		return false
+	var saved_rule: float = float(state["loading_rule"])
 
+	if saved_rule != floor(saved_rule):
+		return false
+	if saved_rule < LoadingRule.ANY or saved_rule > LoadingRule.FULL:
+		return false
 	return true
+func _charge_operating_expenses(delta: float) -> void:
+	operating_timer += delta
+
+	while operating_timer >= 1.0:
+		operating_timer -= 1.0
+		operating_expense.emit(OPERATING_COST_PER_SECOND)
+func get_minimum_load() -> int:
+	match loading_rule:
+		LoadingRule.HALF:
+			return ceili(float(CAPACITY) / 2.0)
+
+		LoadingRule.FULL:
+			return CAPACITY
+
+		_:
+			return 1
