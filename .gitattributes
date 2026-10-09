@@ -1,0 +1,2 @@
+# Normalize text files and keep LF endings in the working folder.
+* text=auto eol=lf

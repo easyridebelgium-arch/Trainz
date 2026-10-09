@@ -28,7 +28,7 @@ const STATION_WAIT: float = 2.0
 
 const SAVE_PATH: String = "user://trainz_save.json"
 const SAVE_TEMP_PATH: String = "user://trainz_save.tmp"
-
+const RailRouter = preload("res://scripts/rail_router.gd")
 const SAVE_FIELDS: Array[String] = [
 	"money",
 	"total_operating_cost",
@@ -74,7 +74,10 @@ var total_construction_cost: int = 0
 
 var notice: String = ""
 var notice_remaining: float = 0.0
-
+var route_cells: Array[Vector2i] = []
+var route_path: Curve2D = Curve2D.new()
+var route_distance: float = 0.0
+var train_heading: float = 0.0
 # Empty means straight track. Other values connect two compass directions.
 var selected_curve: String = ""
 
@@ -178,35 +181,35 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _check_route() -> void:
-	route_connected = true
+	var new_route: Array[Vector2i] = RailRouter.find_route(
+		tracks,
+		STATION_A,
+		STATION_B
+	)
 
-	# Every cell between the stations must have horizontal track.
-	for x in range(STATION_A.x, STATION_B.x + 1):
-		var cell := Vector2i(x, STATION_A.y)
+	# Building elsewhere should not interrupt the current service.
+	if new_route == route_cells:
+		return
 
-		if not tracks.has(cell):
-			route_connected = false
-			break
+	# Return onboard passengers before resetting a changed route.
+	if passengers_on_train > 0:
+		if travelling_to_b:
+			waiting_at_a += passengers_on_train
+		else:
+			waiting_at_b += passengers_on_train
 
-		if tracks[cell] != false:
-			route_connected = false
-			break
+	passengers_on_train = 0
 
-	# Reset the demonstration train if the connection is broken.
-	if not route_connected:
-		# Return any onboard passengers to their departure station.
-		# These refunds may temporarily exceed the normal queue limit.
-		if passengers_on_train > 0:
-			if travelling_to_b:
-				waiting_at_a += passengers_on_train
-			else:
-				waiting_at_b += passengers_on_train
+	route_cells = new_route
+	route_path = RailRouter.make_path(route_cells, float(TILE_SIZE))
+	route_connected = not route_cells.is_empty()
 
-		passengers_on_train = 0
-		train_position = _cell_center(STATION_A)
-		travelling_to_b = true
-		wait_remaining = 0.0
-		train_needs_boarding = true
+	route_distance = 0.0
+	travelling_to_b = true
+	wait_remaining = 0.0
+	train_needs_boarding = true
+
+	_update_train_transform()
 
 
 func _move_train(delta: float) -> void:
@@ -214,28 +217,28 @@ func _move_train(delta: float) -> void:
 		wait_remaining = maxf(0.0, wait_remaining - delta)
 		return
 
-	# Board once, immediately before departure.
 	if train_needs_boarding:
 		_board_passengers()
 		train_needs_boarding = false
 
-	var destination: Vector2 = _cell_center(
-		STATION_B if travelling_to_b else STATION_A
-	)
+	var route_length: float = route_path.get_baked_length()
+	var target_distance: float = route_length if travelling_to_b else 0.0
 
-	train_position = train_position.move_toward(
-		destination,
+	route_distance = move_toward(
+		route_distance,
+		target_distance,
 		TRAIN_SPEED * delta
 	)
 
-	if train_position.distance_to(destination) < 0.01:
-		train_position = destination
-
+	if absf(route_distance - target_distance) < 0.001:
+		route_distance = target_distance
 		_unload_passengers()
 
 		travelling_to_b = not travelling_to_b
 		wait_remaining = STATION_WAIT
 		train_needs_boarding = true
+
+	_update_train_transform()
 
 
 func _cell_center(cell: Vector2i) -> Vector2:
@@ -278,7 +281,7 @@ func _update_instructions() -> void:
 			else "Horizontal"
 		)
 
-	var status: String = "Connect the stations with horizontal track."
+	var status: String = "Connect the stations with matching track pieces."
 
 	if route_connected:
 		if wait_remaining > 0.0:
@@ -467,24 +470,24 @@ func _draw_station(cell: Vector2i, station_name: String) -> void:
 
 
 func _draw_train() -> void:
+	draw_set_transform(train_position, train_heading)
+
 	var body := Rect2(
-		train_position - Vector2(13, 7),
+		Vector2(-13, -7),
 		Vector2(26, 14)
 	)
 
 	draw_rect(body, Color(0.85, 0.22, 0.18))
 	draw_rect(body, Color(0.15, 0.08, 0.08), false, 1.0)
 
-	# The cab window indicates the next direction of travel.
-	var window_offset: float = 5.0 if travelling_to_b else -11.0
-
+	# The front of the train always points along its heading.
 	draw_rect(
-		Rect2(
-			train_position + Vector2(window_offset, -5),
-			Vector2(6, 10)
-		),
+		Rect2(Vector2(5, -5), Vector2(6, 10)),
 		Color(0.65, 0.85, 0.95)
 	)
+
+	# Restore normal drawing coordinates.
+	draw_set_transform(Vector2.ZERO, 0.0)
 
 func _drag_is_vertical(end_cell: Vector2i) -> bool:
 	var difference: Vector2i = end_cell - drag_start
@@ -655,9 +658,9 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 2,
+		"version": 3,
 		"tracks": saved_tracks,
-		"train_x": train_position.x,
+		"route_distance": route_distance,
 		"state": state
 	}
 
@@ -698,8 +701,20 @@ func _is_valid_number(value: Variant) -> bool:
 
 
 func _is_valid_save(data: Dictionary) -> bool:
-	if data.get("version") not in [1, 2]:
+	var saved_version: Variant = data.get("version")
+
+	if not _is_valid_number(saved_version):
 		return false
+
+	var version_number: float = float(saved_version)
+
+	if version_number != floor(version_number):
+		return false
+
+	if version_number < 1.0 or version_number > 3.0:
+		return false
+
+	var version: int = int(version_number)
 
 	if not data.get("tracks") is Array:
 		return false
@@ -707,16 +722,23 @@ func _is_valid_save(data: Dictionary) -> bool:
 	if not data.get("state") is Dictionary:
 		return false
 
-	if not _is_valid_number(data.get("train_x")):
-		return false
+	if version == 3:
+		if not _is_valid_number(data.get("route_distance")):
+			return false
 
-	var train_x: float = float(data["train_x"])
+		if float(data["route_distance"]) < 0.0:
+			return false
+	else:
+		if not _is_valid_number(data.get("train_x")):
+			return false
 
-	if train_x < _cell_center(STATION_A).x:
-		return false
+		var train_x: float = float(data["train_x"])
 
-	if train_x > _cell_center(STATION_B).x:
-		return false
+		if train_x < _cell_center(STATION_A).x:
+			return false
+
+		if train_x > _cell_center(STATION_B).x:
+			return false
 
 	var state: Dictionary = data["state"]
 
@@ -836,16 +858,47 @@ func _load_game() -> void:
 		_show_notice("The save file is damaged or incompatible.")
 		return
 
-	# Validation succeeded. It is now safe to replace the game state.
 	var loaded_tracks: Dictionary = {}
 
 	for entry in data["tracks"]:
 		var cell := Vector2i(int(entry[0]), int(entry[1]))
 		loaded_tracks[cell] = entry[2]
 
-	tracks = loaded_tracks
+	var loaded_cells: Array[Vector2i] = RailRouter.find_route(
+		loaded_tracks,
+		STATION_A,
+		STATION_B
+	)
+	var loaded_path: Curve2D = RailRouter.make_path(
+		loaded_cells,
+		float(TILE_SIZE)
+	)
+
+	var loaded_distance: float = 0.0
+
+	if data["version"] == 3:
+		loaded_distance = float(data["route_distance"])
+	else:
+		# Earlier versions only moved along the direct horizontal route.
+		loaded_distance = (
+			float(data["train_x"]) - _cell_center(STATION_A).x
+		)
 
 	var state: Dictionary = data["state"]
+
+	if loaded_cells.is_empty():
+		if loaded_distance > 0.001 or int(state["passengers_on_train"]) > 0:
+			_show_notice("Save contains a train without a valid route.")
+			return
+	elif loaded_distance > loaded_path.get_baked_length() + 0.001:
+		_show_notice("Saved train position is outside the route.")
+		return
+
+	# All checks passed. Apply the loaded state.
+	tracks = loaded_tracks
+	route_cells = loaded_cells
+	route_path = loaded_path
+	route_connected = not route_cells.is_empty()
 
 	for field in SAVE_FIELDS:
 		var current_value: Variant = get(field)
@@ -858,18 +911,17 @@ func _load_game() -> void:
 			TYPE_BOOL:
 				set(field, state[field])
 
-	train_position = Vector2(
-		float(data["train_x"]),
-		_cell_center(STATION_A).y
+	route_distance = clampf(
+		loaded_distance,
+		0.0,
+		route_path.get_baked_length()
 	)
 
 	is_dragging = false
 
-	# Recalculate connectivity from the loaded track layout.
-	_check_route()
-
-	_update_instructions()
+	_update_train_transform()
 	_show_notice("Game loaded.")
+	_update_instructions()
 	queue_redraw()
 
 func _draw_curve(
@@ -943,3 +995,27 @@ func _is_valid_track_type(value: Variant) -> bool:
 		return value in ["NE", "SE", "SW", "NW"]
 
 	return false
+
+func _update_train_transform() -> void:
+	if not route_connected:
+		train_position = _cell_center(STATION_A)
+		train_heading = 0.0
+		return
+
+	var route_length: float = route_path.get_baked_length()
+
+	train_position = route_path.sample_baked(route_distance)
+
+	var before: Vector2 = route_path.sample_baked(
+		maxf(0.0, route_distance - 1.0)
+	)
+	var after: Vector2 = route_path.sample_baked(
+		minf(route_length, route_distance + 1.0)
+	)
+
+	var direction: Vector2 = after - before
+
+	if not travelling_to_b:
+		direction = -direction
+
+	train_heading = direction.angle()
