@@ -8,6 +8,14 @@ const CAPACITY: int = 20
 const SPEED: float = 60.0
 const STATION_WAIT: float = 2.0
 const OPERATING_COST_PER_SECOND: int = 1
+const MAX_CAPACITY_LEVEL: int = 3
+const MAX_SPEED_LEVEL: int = 3
+
+const CAPACITY_PER_UPGRADE: int = 10
+const SPEED_PER_UPGRADE: float = 20.0
+
+const BASE_CAPACITY_UPGRADE_PRICE: int = 300
+const BASE_SPEED_UPGRADE_PRICE: int = 250
 
 enum LoadingRule {
 	ANY,
@@ -26,6 +34,8 @@ var distance_along_route: float = 0.0
 var to_terminal: bool = true
 var dwell: float = 0.0
 var operating_timer: float = 0.0
+var capacity_level: int = 0
+var speed_level: int = 0
 
 func set_route(cells: Array[Vector2i], tile_size: float) -> void:
 	if cells == route_cells:
@@ -56,7 +66,7 @@ func advance(delta: float, available_logs: int) -> int:
 
 	# Load at the forest before departing.
 	if to_terminal and distance_along_route <= 0.001:
-		loaded = mini(CAPACITY - cargo, available_logs)
+		loaded = mini(get_capacity() - cargo, available_logs)
 		cargo += loaded
 
 		if cargo < get_minimum_load():
@@ -68,7 +78,7 @@ func advance(delta: float, available_logs: int) -> int:
 	distance_along_route = move_toward(
 		distance_along_route,
 		target,
-		SPEED * delta
+		get_speed() * delta
 	)
 
 	if absf(distance_along_route - target) < 0.001:
@@ -151,7 +161,9 @@ func save_state() -> Dictionary:
 		"to_terminal": to_terminal,
 		"dwell": dwell,
 		"operating_timer": operating_timer,
-		"loading_rule": loading_rule
+		"loading_rule": loading_rule,
+		"capacity_level": capacity_level,
+		"speed_level": speed_level
 	}
 
 
@@ -166,6 +178,8 @@ func restore_state(state: Dictionary) -> void:
 	dwell = float(state["dwell"])
 	operating_timer = float(state["operating_timer"])
 	loading_rule = int(state["loading_rule"])
+	capacity_level = int(state["capacity_level"])
+	speed_level = int(state["speed_level"])
 	_update_transform()
 
 
@@ -176,7 +190,9 @@ static func empty_state() -> Dictionary:
 		"to_terminal": true,
 		"dwell": 0.0,
 		"operating_timer": 0.0,
-		"loading_rule": LoadingRule.ANY
+		"loading_rule": LoadingRule.ANY,
+		"capacity_level": 0,
+		"speed_level": 0
 	}
 
 
@@ -189,7 +205,9 @@ static func is_valid_state(state: Dictionary, route_length: float) -> bool:
 		"distance",
 		"dwell",
 		"operating_timer",
-		"loading_rule"
+		"loading_rule",
+		"capacity_level",
+		"speed_level"
 	]:
 		var value: Variant = state.get(field)
 
@@ -201,9 +219,32 @@ static func is_valid_state(state: Dictionary, route_length: float) -> bool:
 		if not is_finite(number) or number < 0.0:
 			return false
 
-	var saved_cargo: float = float(state["cargo"])
+	# These fields must contain whole numbers.
+	for field in [
+		"cargo",
+		"loading_rule",
+		"capacity_level",
+		"speed_level"
+	]:
+		var number: float = float(state[field])
 
-	if saved_cargo != floor(saved_cargo) or saved_cargo > CAPACITY:
+		if number != floor(number):
+			return false
+
+	var saved_capacity_level: float = float(state["capacity_level"])
+	var saved_speed_level: float = float(state["speed_level"])
+
+	if saved_capacity_level > MAX_CAPACITY_LEVEL:
+		return false
+
+	if saved_speed_level > MAX_SPEED_LEVEL:
+		return false
+
+	var saved_capacity: int = (
+		CAPACITY + int(saved_capacity_level) * CAPACITY_PER_UPGRADE
+	)
+
+	if float(state["cargo"]) > saved_capacity:
 		return false
 
 	if float(state["distance"]) > route_length + 0.001:
@@ -211,15 +252,17 @@ static func is_valid_state(state: Dictionary, route_length: float) -> bool:
 
 	if float(state["dwell"]) > STATION_WAIT:
 		return false
+
 	if float(state["operating_timer"]) >= 1.0:
 		return false
+
 	var saved_rule: float = float(state["loading_rule"])
 
-	if saved_rule != floor(saved_rule):
-		return false
 	if saved_rule < LoadingRule.ANY or saved_rule > LoadingRule.FULL:
 		return false
+
 	return true
+	
 func _charge_operating_expenses(delta: float) -> void:
 	operating_timer += delta
 
@@ -229,10 +272,24 @@ func _charge_operating_expenses(delta: float) -> void:
 func get_minimum_load() -> int:
 	match loading_rule:
 		LoadingRule.HALF:
-			return ceili(float(CAPACITY) / 2.0)
+			return ceili(float(get_capacity()) / 2.0)
 
 		LoadingRule.FULL:
-			return CAPACITY
+			return get_capacity()
 
 		_:
 			return 1
+func get_capacity() -> int:
+	return CAPACITY + capacity_level * CAPACITY_PER_UPGRADE
+
+
+func get_speed() -> float:
+	return SPEED + speed_level * SPEED_PER_UPGRADE
+
+
+func get_capacity_upgrade_price() -> int:
+	return BASE_CAPACITY_UPGRADE_PRICE * (capacity_level + 1)
+
+
+func get_speed_upgrade_price() -> int:
+	return BASE_SPEED_UPGRADE_PRICE * (speed_level + 1)

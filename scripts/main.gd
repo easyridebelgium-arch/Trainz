@@ -74,7 +74,7 @@ const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
-const SAVE_VERSION: int = 9
+const SAVE_VERSION: int = 10
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -1471,7 +1471,8 @@ func _setup_station_inspector() -> void:
 	station_panel.offset_left = -304.0
 	station_panel.offset_right = -16.0
 	station_panel.offset_top = 176.0
-	station_panel.offset_bottom = 420.0
+	station_panel.anchor_bottom = 1.0
+	station_panel.offset_bottom = -16.0
 	station_panel.mouse_filter = Control.MOUSE_FILTER_STOP
 
 	var margin := MarginContainer.new()
@@ -1481,9 +1482,16 @@ func _setup_station_inspector() -> void:
 	margin.add_theme_constant_override("margin_bottom", 16)
 	station_panel.add_child(margin)
 
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_AUTO
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	margin.add_child(scroll)
+
 	var content := VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.add_theme_constant_override("separation", 12)
-	margin.add_child(content)
+	scroll.add_child(content)
 
 	station_title = Label.new()
 	station_title.add_theme_font_size_override("font_size", 22)
@@ -1739,6 +1747,9 @@ func _get_speed_upgrade_price() -> int:
 
 
 func _upgrade_capacity() -> void:
+	if selected_station == FOREST_SITE or selected_station == CARGO_TERMINAL:
+		_upgrade_freight_capacity()
+		return
 	if capacity_upgrade_level >= MAX_CAPACITY_LEVEL:
 		_show_notice("Passenger capacity is fully upgraded.")
 		return
@@ -1764,6 +1775,9 @@ func _upgrade_capacity() -> void:
 
 
 func _upgrade_speed() -> void:
+	if selected_station == FOREST_SITE or selected_station == CARGO_TERMINAL:
+		_upgrade_freight_speed()
+		return
 	if speed_upgrade_level >= MAX_SPEED_LEVEL:
 		_show_notice("Train speed is fully upgraded.")
 		return
@@ -1801,8 +1815,26 @@ func _produce_logs(delta: float) -> void:
 			logs_produced += produced
 
 func _update_freight_inspector() -> void:
-	capacity_upgrade_button.hide()
-	speed_upgrade_button.hide()
+	capacity_upgrade_button.show()
+	speed_upgrade_button.show()
+
+	_update_upgrade_button(
+		capacity_upgrade_button,
+		"Capacity",
+		freight_train.capacity_level,
+		FreightTrain.MAX_CAPACITY_LEVEL,
+		freight_train.get_capacity_upgrade_price(),
+		"Adds %d log capacity." % FreightTrain.CAPACITY_PER_UPGRADE
+	)
+
+	_update_upgrade_button(
+		speed_upgrade_button,
+		"Speed",
+		freight_train.speed_level,
+		FreightTrain.MAX_SPEED_LEVEL,
+		freight_train.get_speed_upgrade_price(),
+		"Adds %.0f pixels/second." % FreightTrain.SPEED_PER_UPGRADE
+	)
 	freight_rule_label.show()
 	freight_rule_option.show()
 
@@ -1840,7 +1872,7 @@ func _update_freight_inspector() -> void:
 			MAX_FOREST_STOCK,
 			logs_produced,
 			freight_train.cargo,
-			FreightTrain.CAPACITY,
+			freight_train.get_capacity(),
 			production_status,
 			train_status
 		]
@@ -1866,10 +1898,21 @@ func _update_freight_inspector() -> void:
 			freight_operating_cost,
 			operating_profit,
 			freight_train.cargo,
-			FreightTrain.CAPACITY,
+			freight_train.get_capacity(),
 			FreightTrain.OPERATING_COST_PER_SECOND,
 			train_status
 		]
+		station_details.text += (
+		"\n\nCapacity upgrades: %d/%d"
+		+ "\nSpeed: %.0f px/s"
+		+ "\nSpeed upgrades: %d/%d"
+	) % [
+		freight_train.capacity_level,
+		FreightTrain.MAX_CAPACITY_LEVEL,
+		freight_train.get_speed(),
+		freight_train.speed_level,
+		FreightTrain.MAX_SPEED_LEVEL
+	]
 		
 func _setup_camera_keys() -> void:
 	_add_camera_key(&"camera_up", KEY_W)
@@ -1983,4 +2026,55 @@ func _on_freight_rule_selected(index: int) -> void:
 	freight_train.loading_rule = freight_rule_option.get_item_id(index)
 
 	_show_notice("Freight departure rule updated.")
+	_update_freight_inspector()
+
+func _upgrade_freight_capacity() -> void:
+	if freight_train.capacity_level >= FreightTrain.MAX_CAPACITY_LEVEL:
+		_show_notice("Freight capacity is fully upgraded.")
+		return
+
+	if not paused:
+		_show_notice("Pause the game before upgrading.")
+		return
+
+	var price: int = freight_train.get_capacity_upgrade_price()
+
+	if money < price:
+		_show_notice("Insufficient funds. Capacity upgrade costs £%d." % price)
+		return
+
+	money -= price
+	freight_train.capacity_level += 1
+
+	_show_notice(
+		"Freight capacity increased to %d logs."
+		% freight_train.get_capacity()
+	)
+
+	_update_freight_inspector()
+
+
+func _upgrade_freight_speed() -> void:
+	if freight_train.speed_level >= FreightTrain.MAX_SPEED_LEVEL:
+		_show_notice("Freight speed is fully upgraded.")
+		return
+
+	if not paused:
+		_show_notice("Pause the game before upgrading.")
+		return
+
+	var price: int = freight_train.get_speed_upgrade_price()
+
+	if money < price:
+		_show_notice("Insufficient funds. Speed upgrade costs £%d." % price)
+		return
+
+	money -= price
+	freight_train.speed_level += 1
+
+	_show_notice(
+		"Freight speed increased to %.0f pixels/second."
+		% freight_train.get_speed()
+	)
+
 	_update_freight_inspector()
