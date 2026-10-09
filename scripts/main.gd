@@ -283,13 +283,35 @@ func _mouse_to_cell() -> Vector2i:
 	)
 
 
-func _can_build_at(cell: Vector2i) -> bool:
+func _is_inside_map(cell: Vector2i) -> bool:
 	return (
 		cell.x >= 0
 		and cell.x < MAP_WIDTH
 		and cell.y >= 0
 		and cell.y < MAP_HEIGHT
 	)
+
+
+func _is_station_space(cell: Vector2i) -> bool:
+	for station in [STATION_A, STATION_B]:
+		var inside_columns: bool = (
+			cell.x >= station.x - 1
+			and cell.x <= station.x + 1
+		)
+
+		var inside_rows: bool = (
+			cell.y >= station.y - 2
+			and cell.y < station.y
+		)
+
+		if inside_columns and inside_rows:
+			return true
+
+	return false
+
+
+func _can_build_at(cell: Vector2i) -> bool:
+	return _is_inside_map(cell) and not _is_station_space(cell)
 
 
 func _update_instructions() -> void:
@@ -393,15 +415,15 @@ func _draw() -> void:
 
 			for cell in _get_drag_cells(hovered_cell):
 				if not tracks.has(cell):
-					_draw_track(cell, track_type, true)
+					_draw_build_preview(cell, track_type)
 		else:
-			if _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
+			if _is_inside_map(hovered_cell) and not tracks.has(hovered_cell):
 				var track_type: Variant = placing_vertical
 
 				if not selected_curve.is_empty():
 					track_type = selected_curve
 
-				_draw_track(hovered_cell, track_type, true)
+				_draw_build_preview(hovered_cell, track_type)
 
 	_draw_train()
 
@@ -500,28 +522,49 @@ func _draw_track(
 func _draw_station(cell: Vector2i, station_name: String) -> void:
 	var origin: Vector2 = Vector2(cell) * TILE_SIZE
 
-	# A platform just above the track.
+	var footprint := Rect2(
+		origin + Vector2(-TILE_SIZE, -2 * TILE_SIZE),
+		Vector2(3 * TILE_SIZE, 2 * TILE_SIZE)
+	)
+
+	# Reserved station grounds.
 	draw_rect(
-		Rect2(origin + Vector2(-8, -12), Vector2(48, 10)),
-		Color(0.65, 0.68, 0.7)
+		footprint,
+		Color(0.17, 0.20, 0.22)
 	)
 
-	# Yellow platform edge.
-	draw_line(
-		origin + Vector2(-8, -3),
-		origin + Vector2(40, -3),
-		Color(0.95, 0.8, 0.25),
-		2.0
+	draw_rect(
+		footprint,
+		Color(0.35, 0.40, 0.43),
+		false,
+		1.0
 	)
 
+	# Name centered inside the reserved area.
 	draw_string(
 		ThemeDB.fallback_font,
-		origin + Vector2(-12, -22),
+		origin + Vector2(-24, -38),
 		station_name,
-		HORIZONTAL_ALIGNMENT_LEFT,
-		-1,
+		HORIZONTAL_ALIGNMENT_CENTER,
+		80.0,
 		16,
 		Color.WHITE
+	)
+
+	# Platform alongside the station track.
+	draw_rect(
+		Rect2(
+			origin + Vector2(-24, -16),
+			Vector2(80, 12)
+		),
+		Color(0.65, 0.68, 0.70)
+	)
+
+	draw_line(
+		origin + Vector2(-24, -4),
+		origin + Vector2(56, -4),
+		Color(0.95, 0.80, 0.25),
+		2.0
 	)
 
 
@@ -560,7 +603,7 @@ func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
 
 	if not selected_curve.is_empty():
-		if _can_build_at(drag_start):
+		if _is_inside_map(drag_start):
 			cells.append(drag_start)
 
 		return cells
@@ -572,7 +615,7 @@ func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
 		for y in range(first_y, last_y + 1):
 			var cell := Vector2i(drag_start.x, y)
 
-			if _can_build_at(cell):
+			if _is_inside_map(cell):
 				cells.append(cell)
 	else:
 		var first_x: int = mini(drag_start.x, end_cell.x)
@@ -581,7 +624,7 @@ func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
 		for x in range(first_x, last_x + 1):
 			var cell := Vector2i(x, drag_start.y)
 
-			if _can_build_at(cell):
+			if _is_inside_map(cell):
 				cells.append(cell)
 
 	return cells
@@ -592,6 +635,12 @@ func _finish_track_drag(end_cell: Vector2i) -> void:
 	var new_cells: Array[Vector2i] = []
 
 	for cell in _get_drag_cells(end_cell):
+		if _is_station_space(cell):
+			is_dragging = false
+			_show_notice("Cannot build through a station platform.")
+			queue_redraw()
+			return
+
 		if not tracks.has(cell):
 			new_cells.append(cell)
 
@@ -936,6 +985,7 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 		var cell := Vector2i(int(entry[0]), int(entry[1]))
 		loaded_tracks[cell] = entry[2]
 
+	var removed_count: int = _remove_station_space_tracks(loaded_tracks)
 	var loaded_cells: Array[Vector2i] = RailRouter.find_route(
 		loaded_tracks,
 		STATION_A,
@@ -957,6 +1007,25 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 		)
 
 	var state: Dictionary = data["state"]
+	if removed_count > 0:
+		state["money"] = (
+			int(state["money"])
+			+ removed_count * TRACK_BUILD_COST
+		)
+
+		# Return passengers before resetting the affected saved session.
+		var onboard: int = int(state["passengers_on_train"])
+
+		if bool(state["travelling_to_b"]):
+			state["waiting_at_a"] = int(state["waiting_at_a"]) + onboard
+		else:
+			state["waiting_at_b"] = int(state["waiting_at_b"]) + onboard
+
+		state["passengers_on_train"] = 0
+		state["travelling_to_b"] = true
+		state["wait_remaining"] = 0.0
+		state["train_needs_boarding"] = true
+		loaded_distance = 0.0
 
 	if loaded_cells.is_empty():
 		if loaded_distance > 0.001 or int(state["passengers_on_train"]) > 0:
@@ -992,7 +1061,12 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	is_dragging = false
 
 	_update_train_transform()
-	if save_path == SAVE_BACKUP_PATH:
+	if removed_count > 0:
+		_show_notice(
+			"Loaded: removed %d tracks from station space; refunded £%d."
+			% [removed_count, removed_count * TRACK_BUILD_COST]
+		)
+	elif save_path == SAVE_BACKUP_PATH:
 		_show_notice("Previous save loaded.")
 	else:
 		_show_notice("Game loaded.")
@@ -1339,13 +1413,21 @@ func _close_station_inspector() -> void:
 
 
 func _inspect_station_at(cell: Vector2i) -> void:
-	if cell != STATION_A and cell != STATION_B:
-		_close_station_inspector()
-		return
+	for station in [STATION_A, STATION_B]:
+		var inside_station_grounds: bool = (
+			cell.x >= station.x - 1
+			and cell.x <= station.x + 1
+			and cell.y >= station.y - 2
+			and cell.y < station.y
+		)
 
-	selected_station = cell
-	station_panel.show()
-	_update_station_inspector()
+		if cell == station or inside_station_grounds:
+			selected_station = station
+			station_panel.show()
+			_update_station_inspector()
+			return
+
+	_close_station_inspector()
 
 
 func _update_station_inspector() -> void:
@@ -1392,3 +1474,41 @@ func _update_station_inspector() -> void:
 		TRAIN_CAPACITY,
 		service_status
 	]
+
+func _draw_build_preview(cell: Vector2i, track_type: Variant) -> void:
+	if _is_station_space(cell):
+		var origin: Vector2 = Vector2(cell) * TILE_SIZE
+		var warning_color := Color(1.0, 0.3, 0.25)
+
+		draw_rect(
+			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
+			Color(1.0, 0.15, 0.1, 0.25)
+		)
+
+		draw_line(
+			origin + Vector2(6, 6),
+			origin + Vector2(TILE_SIZE - 6, TILE_SIZE - 6),
+			warning_color,
+			2.0
+		)
+
+		draw_line(
+			origin + Vector2(TILE_SIZE - 6, 6),
+			origin + Vector2(6, TILE_SIZE - 6),
+			warning_color,
+			2.0
+		)
+
+		return
+
+	_draw_track(cell, track_type, true)
+
+func _remove_station_space_tracks(track_data: Dictionary) -> int:
+	var removed_count: int = 0
+
+	for cell in track_data.keys():
+		if _is_station_space(cell):
+			track_data.erase(cell)
+			removed_count += 1
+
+	return removed_count
