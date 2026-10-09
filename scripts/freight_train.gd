@@ -1,0 +1,191 @@
+extends Node2D
+
+signal delivered(amount: int)
+
+const Router = preload("res://scripts/rail_router.gd")
+
+const CAPACITY: int = 20
+const SPEED: float = 60.0
+const STATION_WAIT: float = 2.0
+
+var home_position: Vector2 = Vector2.ZERO
+var cargo: int = 0
+
+var route_cells: Array[Vector2i] = []
+var route_path: Curve2D = Curve2D.new()
+
+var distance_along_route: float = 0.0
+var to_terminal: bool = true
+var dwell: float = 0.0
+
+
+func set_route(cells: Array[Vector2i], tile_size: float) -> void:
+	if cells == route_cells:
+		return
+
+	route_cells = cells.duplicate()
+	route_path = Router.make_path(route_cells, tile_size)
+
+	distance_along_route = 0.0
+	to_terminal = true
+	dwell = 0.0
+
+	# Keep onboard logs when a route changes or is disconnected.
+	_update_transform()
+
+
+func advance(delta: float, available_logs: int) -> int:
+	if route_cells.is_empty():
+		return 0
+
+	if dwell > 0.0:
+		dwell = maxf(0.0, dwell - delta)
+		return 0
+
+	var loaded: int = 0
+
+	# Load at the forest before departing.
+	if to_terminal and distance_along_route <= 0.001:
+		loaded = mini(CAPACITY - cargo, available_logs)
+		cargo += loaded
+
+		if cargo == 0:
+			return 0
+
+	var route_length: float = route_path.get_baked_length()
+	var target: float = route_length if to_terminal else 0.0
+
+	distance_along_route = move_toward(
+		distance_along_route,
+		target,
+		SPEED * delta
+	)
+
+	if absf(distance_along_route - target) < 0.001:
+		distance_along_route = target
+
+		if to_terminal:
+			var delivered_amount: int = cargo
+			cargo = 0
+
+			if delivered_amount > 0:
+				delivered.emit(delivered_amount)
+
+		to_terminal = not to_terminal
+		dwell = STATION_WAIT
+
+	_update_transform()
+	return loaded
+
+
+func _update_transform() -> void:
+	if route_cells.is_empty():
+		position = home_position
+		rotation = 0.0
+		return
+
+	var route_length: float = route_path.get_baked_length()
+
+	position = route_path.sample_baked(distance_along_route)
+
+	var before: Vector2 = route_path.sample_baked(
+		maxf(0.0, distance_along_route - 1.0)
+	)
+	var after: Vector2 = route_path.sample_baked(
+		minf(route_length, distance_along_route + 1.0)
+	)
+
+	var direction: Vector2 = after - before
+
+	if not to_terminal:
+		direction = -direction
+
+	rotation = direction.angle()
+
+
+func _draw() -> void:
+	var body := Rect2(Vector2(-14, -8), Vector2(28, 16))
+
+	draw_rect(body, Color(0.15, 0.45, 0.85))
+	draw_rect(body, Color(0.05, 0.12, 0.22), false, 1.0)
+
+	draw_rect(
+		Rect2(Vector2(6, -5), Vector2(6, 10)),
+		Color(0.75, 0.9, 1.0)
+	)
+
+
+func status_text() -> String:
+	if route_cells.is_empty():
+		return "Needs a separate connected freight route"
+
+	if dwell > 0.0:
+		return "Stopped at loading track"
+
+	if to_terminal:
+		if distance_along_route <= 0.001 and cargo == 0:
+			return "Waiting for logs"
+
+		return "Travelling to terminal"
+
+	return "Returning to forest"
+
+
+func save_state() -> Dictionary:
+	return {
+		"cargo": cargo,
+		"distance": distance_along_route,
+		"to_terminal": to_terminal,
+		"dwell": dwell
+	}
+
+
+func restore_state(state: Dictionary) -> void:
+	cargo = int(state["cargo"])
+	distance_along_route = clampf(
+		float(state["distance"]),
+		0.0,
+		route_path.get_baked_length()
+	)
+	to_terminal = state["to_terminal"]
+	dwell = float(state["dwell"])
+
+	_update_transform()
+
+
+static func empty_state() -> Dictionary:
+	return {
+		"cargo": 0,
+		"distance": 0.0,
+		"to_terminal": true,
+		"dwell": 0.0
+	}
+
+
+static func is_valid_state(state: Dictionary, route_length: float) -> bool:
+	if typeof(state.get("to_terminal")) != TYPE_BOOL:
+		return false
+
+	for field in ["cargo", "distance", "dwell"]:
+		var value: Variant = state.get(field)
+
+		if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
+			return false
+
+		var number: float = float(value)
+
+		if not is_finite(number) or number < 0.0:
+			return false
+
+	var saved_cargo: float = float(state["cargo"])
+
+	if saved_cargo != floor(saved_cargo) or saved_cargo > CAPACITY:
+		return false
+
+	if float(state["distance"]) > route_length + 0.001:
+		return false
+
+	if float(state["dwell"]) > STATION_WAIT:
+		return false
+
+	return true
