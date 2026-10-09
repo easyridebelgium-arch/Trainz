@@ -42,7 +42,8 @@ const SAVE_FIELDS: Array[String] = [
 	"wait_remaining",
 	"train_needs_boarding",
 	"paused",
-	"train_upgrade_level"
+	"capacity_upgrade_level",
+	"speed_upgrade_level"
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
@@ -51,10 +52,14 @@ const MIN_ZOOM: float = 0.5
 const MAX_ZOOM: float = 3.0
 const ZOOM_STEP: float = 1.15
 const SAVE_BACKUP_PATH: String = "user://trainz_save.backup.json"
-const MAX_TRAIN_UPGRADE_LEVEL: int = 3
+const MAX_CAPACITY_LEVEL: int = 3
+const MAX_SPEED_LEVEL: int = 3
+
+const BASE_CAPACITY_UPGRADE_PRICE: int = 250
+const BASE_SPEED_UPGRADE_PRICE: int = 200
 const CAPACITY_PER_UPGRADE: int = 10
 const SPEED_PER_UPGRADE: float = 20.0
-const BASE_UPGRADE_PRICE: int = 250
+
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -98,8 +103,11 @@ var selected_station: Vector2i = Vector2i(-1, -1)
 var station_panel: PanelContainer
 var station_title: Label
 var station_details: Label
-var train_upgrade_level: int = 0
-var upgrade_button: Button
+var capacity_upgrade_level: int = 0
+var speed_upgrade_level: int = 0
+
+var capacity_upgrade_button: Button
+var speed_upgrade_button: Button
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -772,7 +780,7 @@ func _save_game() -> void:
 		state[field] = get(field)
 
 	var data: Dictionary = {
-		"version": 4,
+		"version": 5,
 		"tracks": saved_tracks,
 		"route_distance": route_distance,
 		"state": state
@@ -836,7 +844,7 @@ func _is_valid_save(data: Dictionary) -> bool:
 	if version_number != floor(version_number):
 		return false
 
-	if version_number < 1.0 or version_number > 4.0:
+	if version_number < 1.0 or version_number > 5.0:
 		return false
 
 	var version: int = int(version_number)
@@ -894,13 +902,18 @@ func _is_valid_save(data: Dictionary) -> bool:
 			if field != "money" and number < 0.0:
 				return false
 
-	var saved_level: int = int(state["train_upgrade_level"])
+	var saved_capacity_level: int = int(state["capacity_upgrade_level"])
+	var saved_speed_level: int = int(state["speed_upgrade_level"])
 
-	if saved_level < 0 or saved_level > MAX_TRAIN_UPGRADE_LEVEL:
+	if saved_capacity_level < 0 or saved_capacity_level > MAX_CAPACITY_LEVEL:
+		return false
+
+	if saved_speed_level < 0 or saved_speed_level > MAX_SPEED_LEVEL:
 		return false
 
 	var saved_capacity: int = (
-		TRAIN_CAPACITY + saved_level * CAPACITY_PER_UPGRADE
+		TRAIN_CAPACITY
+		+ saved_capacity_level * CAPACITY_PER_UPGRADE
 	)
 
 	if float(state["passengers_on_train"]) > saved_capacity:
@@ -990,14 +1003,25 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 		return
 
 	var data: Dictionary = parser.data
-	# Older save formats used the starting train specifications.
+	# Convert earlier upgrade formats before validating the save.
 	if _is_valid_number(data.get("version")):
 		var old_version: float = float(data["version"])
 
-		if old_version >= 1.0 and old_version <= 3.0:
-			if data.get("state") is Dictionary:
-				var old_state: Dictionary = data["state"]
-				old_state["train_upgrade_level"] = 0
+		if data.get("state") is Dictionary:
+			var old_state: Dictionary = data["state"]
+
+			if old_version >= 1.0 and old_version <= 3.0:
+				old_state["capacity_upgrade_level"] = 0
+				old_state["speed_upgrade_level"] = 0
+
+			elif old_version == 4.0:
+				# A combined upgrade granted both improvements.
+				var combined_level: Variant = old_state.get(
+					"train_upgrade_level"
+				)
+
+				old_state["capacity_upgrade_level"] = combined_level
+				old_state["speed_upgrade_level"] = combined_level
 	if not _is_valid_save(data):
 		_show_notice("The save file is damaged or incompatible.")
 		return
@@ -1410,10 +1434,15 @@ func _setup_station_inspector() -> void:
 	station_details.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	content.add_child(station_details)
 	
-	upgrade_button = Button.new()
-	upgrade_button.focus_mode = Control.FOCUS_NONE
-	upgrade_button.pressed.connect(_upgrade_train)
-	content.add_child(upgrade_button)
+	capacity_upgrade_button = Button.new()
+	capacity_upgrade_button.focus_mode = Control.FOCUS_NONE
+	capacity_upgrade_button.pressed.connect(_upgrade_capacity)
+	content.add_child(capacity_upgrade_button)
+
+	speed_upgrade_button = Button.new()
+	speed_upgrade_button.focus_mode = Control.FOCUS_NONE
+	speed_upgrade_button.pressed.connect(_upgrade_speed)
+	content.add_child(speed_upgrade_button)
 	var close_button := Button.new()
 	close_button.text = "Close"
 	close_button.focus_mode = Control.FOCUS_NONE
@@ -1492,40 +1521,64 @@ func _update_station_inspector() -> void:
 		"Destination: %s"
 		+ "\n\nWaiting passengers: %d"
 		+ "\nIncoming passengers: %d"
-		+ "\n\nShared train level: %d/%d"
-		+ "\nCapacity: %d passengers"
-		+ "\nSpeed: %.0f pixels/second"
+		+ "\n\nShared train"
+		+ "\nCapacity: %d passengers (%d/%d)"
+		+ "\nSpeed: %.0f px/s (%d/%d)"
 		+ "\n\n%s"
 	) % [
 		destination_name,
 		waiting,
 		incoming,
-		train_upgrade_level,
-		MAX_TRAIN_UPGRADE_LEVEL,
 		_get_train_capacity(),
+		capacity_upgrade_level,
+		MAX_CAPACITY_LEVEL,
 		_get_train_speed(),
+		speed_upgrade_level,
+		MAX_SPEED_LEVEL,
 		service_status
 	]
 
-	if train_upgrade_level >= MAX_TRAIN_UPGRADE_LEVEL:
-		upgrade_button.text = "Train fully upgraded"
-		upgrade_button.disabled = true
-		upgrade_button.tooltip_text = "All available upgrades are installed."
+	_update_upgrade_button(
+		capacity_upgrade_button,
+		"Capacity",
+		capacity_upgrade_level,
+		MAX_CAPACITY_LEVEL,
+		_get_capacity_upgrade_price(),
+		"Adds %d passenger seats." % CAPACITY_PER_UPGRADE
+	)
+
+	_update_upgrade_button(
+		speed_upgrade_button,
+		"Speed",
+		speed_upgrade_level,
+		MAX_SPEED_LEVEL,
+		_get_speed_upgrade_price(),
+		"Adds %.0f pixels/second." % SPEED_PER_UPGRADE
+	)
+			
+func _update_upgrade_button(
+	button: Button,
+	upgrade_name: String,
+	level: int,
+	maximum_level: int,
+	price: int,
+	benefit: String
+) -> void:
+	if level >= maximum_level:
+		button.text = upgrade_name + ": fully upgraded"
+		button.disabled = true
+		button.tooltip_text = "All upgrades of this type are installed."
+		return
+
+	button.text = "%s + (£%d)" % [upgrade_name, price]
+	button.disabled = not paused or money < price
+
+	if not paused:
+		button.tooltip_text = "Pause the game to upgrade."
+	elif money < price:
+		button.tooltip_text = "Requires £%d. %s" % [price, benefit]
 	else:
-		var price: int = _get_upgrade_price()
-
-		upgrade_button.text = "Upgrade train (£%d)" % price
-		upgrade_button.disabled = not paused or money < price
-
-		if not paused:
-			upgrade_button.tooltip_text = "Pause the game to upgrade."
-		elif money < price:
-			upgrade_button.tooltip_text = "You need £%d to upgrade." % price
-		else:
-			upgrade_button.tooltip_text = (
-				"Adds %d seats and %.0f pixels/second."
-				% [CAPACITY_PER_UPGRADE, SPEED_PER_UPGRADE]
-			)
+		button.tooltip_text = benefit
 
 func _draw_build_preview(cell: Vector2i, track_type: Variant) -> void:
 	if _is_station_space(cell):
@@ -1565,38 +1618,65 @@ func _remove_station_space_tracks(track_data: Dictionary) -> int:
 
 	return removed_count
 func _get_train_capacity() -> int:
-	return TRAIN_CAPACITY + train_upgrade_level * CAPACITY_PER_UPGRADE
+	return TRAIN_CAPACITY + capacity_upgrade_level * CAPACITY_PER_UPGRADE
 
 
 func _get_train_speed() -> float:
-	return TRAIN_SPEED + train_upgrade_level * SPEED_PER_UPGRADE
+	return TRAIN_SPEED + speed_upgrade_level * SPEED_PER_UPGRADE
+
+func _get_capacity_upgrade_price() -> int:
+	return BASE_CAPACITY_UPGRADE_PRICE * (capacity_upgrade_level + 1)
 
 
-func _get_upgrade_price() -> int:
-	return BASE_UPGRADE_PRICE * (train_upgrade_level + 1)
+func _get_speed_upgrade_price() -> int:
+	return BASE_SPEED_UPGRADE_PRICE * (speed_upgrade_level + 1)
 
 
-func _upgrade_train() -> void:
-	if train_upgrade_level >= MAX_TRAIN_UPGRADE_LEVEL:
-		_show_notice("The train is already fully upgraded.")
+func _upgrade_capacity() -> void:
+	if capacity_upgrade_level >= MAX_CAPACITY_LEVEL:
+		_show_notice("Passenger capacity is fully upgraded.")
 		return
 
 	if not paused:
-		_show_notice("Pause the game before upgrading the train.")
+		_show_notice("Pause the game before upgrading.")
 		return
 
-	var price: int = _get_upgrade_price()
+	var price: int = _get_capacity_upgrade_price()
 
 	if money < price:
-		_show_notice("Insufficient funds. Upgrade costs £%d." % price)
+		_show_notice("Insufficient funds. Capacity upgrade costs £%d." % price)
 		return
 
 	money -= price
-	train_upgrade_level += 1
+	capacity_upgrade_level += 1
 
 	_show_notice(
-		"Train upgraded: capacity %d, speed %.0f."
-		% [_get_train_capacity(), _get_train_speed()]
+		"Capacity upgraded to %d passengers." % _get_train_capacity()
+	)
+
+	_update_station_inspector()
+
+
+func _upgrade_speed() -> void:
+	if speed_upgrade_level >= MAX_SPEED_LEVEL:
+		_show_notice("Train speed is fully upgraded.")
+		return
+
+	if not paused:
+		_show_notice("Pause the game before upgrading.")
+		return
+
+	var price: int = _get_speed_upgrade_price()
+
+	if money < price:
+		_show_notice("Insufficient funds. Speed upgrade costs £%d." % price)
+		return
+
+	money -= price
+	speed_upgrade_level += 1
+
+	_show_notice(
+		"Speed upgraded to %.0f pixels/second." % _get_train_speed()
 	)
 
 	_update_station_inspector()
