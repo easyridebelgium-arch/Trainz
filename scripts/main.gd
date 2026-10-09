@@ -49,7 +49,8 @@ const SAVE_FIELDS: Array[String] = [
 	"log_production_timer",
 	"logs_delivered",
 	"freight_income",
-	"freight_operating_cost"
+	"freight_operating_cost",
+	"passenger_service_enabled"
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
@@ -74,7 +75,7 @@ const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
-const SAVE_VERSION: int = 10
+const SAVE_VERSION: int = 11
 const MAX_CONSTRUCTION_HISTORY: int = 100
 
 # A false value means horizontal; true means vertical.
@@ -139,6 +140,8 @@ var construction_redo: Array[Dictionary] = []
 
 var undo_button: Button
 var redo_button: Button
+var passenger_service_enabled: bool = true
+var service_button: Button
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -185,7 +188,7 @@ func _process(delta: float) -> void:
 		_produce_logs(delta)
 		forest_stock -= freight_train.advance(delta, forest_stock)
 
-		if route_connected:
+		if _passenger_service_is_active():
 			_move_train(delta)
 			_charge_operating_cost(delta)
 
@@ -379,15 +382,7 @@ func _update_instructions() -> void:
 			else "Horizontal"
 		)
 
-	var status: String = "Connect the stations with matching track pieces."
-
-	if route_connected:
-		if wait_remaining > 0.0:
-			status = "At station: departing in %.1f seconds." % wait_remaining
-		else:
-			status = "Travelling to " + (
-				"Station B." if travelling_to_b else "Station A."
-			)
+	var status: String = _passenger_service_status()
 
 	if paused:
 		status = "Paused. Press Space to resume."
@@ -1562,6 +1557,10 @@ func _setup_station_inspector() -> void:
 
 	freight_rule_label.hide()
 	freight_rule_option.hide()
+	service_button = Button.new()
+	service_button.focus_mode = Control.FOCUS_NONE
+	service_button.pressed.connect(_toggle_selected_service)
+	content.add_child(service_button)
 	var close_button := Button.new()
 	close_button.text = "Close"
 	close_button.focus_mode = Control.FOCUS_NONE
@@ -1608,6 +1607,7 @@ func _inspect_station_at(cell: Vector2i) -> void:
 func _update_station_inspector() -> void:
 	if not station_panel.visible:
 		return
+	_update_service_button()
 
 	if selected_station == FOREST_SITE or selected_station == CARGO_TERMINAL:
 		_update_freight_inspector()
@@ -1635,10 +1635,7 @@ func _update_station_inspector() -> void:
 		train_position.distance_to(_cell_center(selected_station)) < 0.5
 	)
 
-	var service_status: String = "No connected service"
-
-	if route_connected:
-		service_status = "Service connected"
+	var service_status: String = _passenger_service_status()
 
 	if train_at_station:
 		service_status += "\nTrain at platform"
@@ -2274,3 +2271,85 @@ func _update_history_controls() -> void:
 	else:
 		undo_button.tooltip_text = "Undo the latest paused construction action."
 		redo_button.tooltip_text = "Repeat the latest undone construction action."
+func _passenger_service_is_active() -> bool:
+	if not route_connected:
+		return false
+
+	if passenger_service_enabled:
+		return true
+
+	# A withdrawn train completes its round trip before stopping.
+	var parked_at_a: bool = (
+		route_distance <= 0.001
+		and travelling_to_b
+	)
+
+	return not parked_at_a
+
+
+func _passenger_service_status() -> String:
+	if not route_connected:
+		return "No connected passenger route"
+
+	if not passenger_service_enabled:
+		if _passenger_service_is_active():
+			return "Withdrawing after return to Station A"
+
+		return "Passenger service stopped at Station A"
+
+	if wait_remaining > 0.0:
+		return "At station: departing in %.1f seconds." % wait_remaining
+
+	return "Travelling to " + (
+		"Station B." if travelling_to_b else "Station A."
+	)
+
+func _selected_service_is_freight() -> bool:
+	return (
+		selected_station == FOREST_SITE
+		or selected_station == CARGO_TERMINAL
+	)
+
+
+func _toggle_selected_service() -> void:
+	if _selected_service_is_freight():
+		freight_train.service_enabled = not freight_train.service_enabled
+
+		if freight_train.service_enabled:
+			_show_notice("Freight service enabled.")
+		else:
+			_show_notice("Freight service will stop at the forest.")
+	else:
+		passenger_service_enabled = not passenger_service_enabled
+
+		if passenger_service_enabled:
+			_show_notice("Passenger service enabled.")
+		else:
+			_show_notice("Passenger service will stop at Station A.")
+
+	_update_station_inspector()
+
+
+func _update_service_button() -> void:
+	if _selected_service_is_freight():
+		if freight_train.service_enabled:
+			service_button.text = "Withdraw freight service"
+			service_button.tooltip_text = (
+				"Finish the current round trip, then stop at the forest."
+			)
+		else:
+			service_button.text = "Enable freight service"
+			service_button.tooltip_text = (
+				"Resume service, or cancel a pending withdrawal."
+			)
+	else:
+		if passenger_service_enabled:
+			service_button.text = "Withdraw passenger service"
+			service_button.tooltip_text = (
+				"Finish the current round trip, then stop at Station A."
+			)
+		else:
+			service_button.text = "Enable passenger service"
+			service_button.tooltip_text = (
+				"Resume service, or cancel a pending withdrawal."
+			)

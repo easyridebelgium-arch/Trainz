@@ -36,6 +36,7 @@ var dwell: float = 0.0
 var operating_timer: float = 0.0
 var capacity_level: int = 0
 var speed_level: int = 0
+var service_enabled: bool = true
 
 func set_route(cells: Array[Vector2i], tile_size: float) -> void:
 	if cells == route_cells:
@@ -53,7 +54,7 @@ func set_route(cells: Array[Vector2i], tile_size: float) -> void:
 
 
 func advance(delta: float, available_logs: int) -> int:
-	if route_cells.is_empty():
+	if not service_is_active():
 		return 0
 
 	_charge_operating_expenses(delta)
@@ -138,6 +139,11 @@ func _draw() -> void:
 func status_text() -> String:
 	if route_cells.is_empty():
 		return "Needs a separate connected freight route"
+	if not service_enabled:
+		if service_is_active():
+			return "Withdrawing after return to forest"
+
+		return "Freight service stopped at forest"
 
 	if dwell > 0.0:
 		return "Stopped at loading track"
@@ -163,7 +169,8 @@ func save_state() -> Dictionary:
 		"operating_timer": operating_timer,
 		"loading_rule": loading_rule,
 		"capacity_level": capacity_level,
-		"speed_level": speed_level
+		"speed_level": speed_level,
+		"service_enabled": service_enabled
 	}
 
 
@@ -180,6 +187,7 @@ func restore_state(state: Dictionary) -> void:
 	loading_rule = int(state["loading_rule"])
 	capacity_level = int(state["capacity_level"])
 	speed_level = int(state["speed_level"])
+	service_enabled = state["service_enabled"]
 	_update_transform()
 
 
@@ -192,11 +200,14 @@ static func empty_state() -> Dictionary:
 		"operating_timer": 0.0,
 		"loading_rule": LoadingRule.ANY,
 		"capacity_level": 0,
-		"speed_level": 0
+		"speed_level": 0,
+		"service_enabled": true
 	}
 
 
 static func is_valid_state(state: Dictionary, route_length: float) -> bool:
+	if typeof(state.get("service_enabled")) != TYPE_BOOL:
+		return false
 	if typeof(state.get("to_terminal")) != TYPE_BOOL:
 		return false
 
@@ -293,3 +304,16 @@ func get_capacity_upgrade_price() -> int:
 
 func get_speed_upgrade_price() -> int:
 	return BASE_SPEED_UPGRADE_PRICE * (speed_level + 1)
+func service_is_active() -> bool:
+	if route_cells.is_empty():
+		return false
+
+	if service_enabled:
+		return true
+
+	var parked_at_forest: bool = (
+		distance_along_route <= 0.001
+		and to_terminal
+	)
+
+	return not parked_at_forest
