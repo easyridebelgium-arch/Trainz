@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="64" viewBox="0 0 320 32">
+  <g fill="none" stroke="#E8EEF6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- 0: Straight track -->
+    <g>
+      <path d="M7 8H25 M7 16H25 M7 24H25"></path>
+      <path d="M11 4V28 M21 4V28"></path>
+    </g>
+
+    <!-- 1: Curved track -->
+    <g transform="translate(32 0)">
+      <path d="M7 4C7 18 14 25 28 25"></path>
+      <path d="M15 4C15 13 20 17 28 17"></path>
+      <path d="M4 9H17 M8 20L17 12 M19 28V15"></path>
+    </g>
+
+    <!-- 2: Rotate -->
+    <g transform="translate(64 0)">
+      <path d="M25 12A10 10 0 1 0 25 22"></path>
+      <path d="M19 12H26V5"></path>
+    </g>
+
+    <!-- 3: Inspect -->
+    <g transform="translate(96 0)">
+      <circle cx="14" cy="14" r="8"></circle>
+      <path d="M20 20L27 27"></path>
+      <path d="M14 10V18 M10 14H18"></path>
+    </g>
+
+    <!-- 4: Pause -->
+    <g transform="translate(128 0)" fill="#E8EEF6" stroke="none">
+      <rect x="8" y="6" width="5" height="20" rx="1"></rect>
+      <rect x="19" y="6" width="5" height="20" rx="1"></rect>
+    </g>
+
+    <!-- 5: Resume -->
+    <g transform="translate(160 0)" fill="#E8EEF6" stroke="none">
+      <path d="M10 5L27 16L10 27Z"></path>
+    </g>
+
+    <!-- 6: Save -->
+    <g transform="translate(192 0)">
+      <path d="M5 4H23L27 8V28H5Z"></path>
+      <path d="M10 4V12H22V4"></path>
+      <path d="M10 28V19H22V28"></path>
+      <path d="M18 7V9"></path>
+    </g>
+
+    <!-- 7: Load -->
+    <g transform="translate(224 0)">
+      <path d="M16 4V20"></path>
+      <path d="M10 14L16 20L22 14"></path>
+      <path d="M5 21V28H27V21"></path>
+    </g>
+
+    <!-- 8: Save folder -->
+    <g transform="translate(256 0)">
+      <path d="M4 9H13L16 12H28V27H4Z"></path>
+      <path d="M4 9V6H13L16 9H26V12"></path>
+    </g>
+
+    <!-- 9: Previous save -->
+    <g transform="translate(288 0)">
+      <path d="M7 11A10 10 0 1 1 6 22"></path>
+      <path d="M7 5V12H2"></path>
+      <path d="M16 11V18H21"></path>
+    </g>
+
+  </g>
+</svg>

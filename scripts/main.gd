@@ -77,6 +77,7 @@ const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
 const SAVE_VERSION: int = 11
 const MAX_CONSTRUCTION_HISTORY: int = 100
+const TOOLBAR_ICON_SHEET = preload("res://assets/ui/icons/toolbar.svg")
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
@@ -145,6 +146,7 @@ var service_button: Button
 var demolition_mode: bool = false
 var demolition_cells: Dictionary = {}
 var demolition_last_cell: Vector2i = Vector2i.ZERO
+var toolbar_icon_textures: Array[Texture2D] = []
 
 @onready var instructions: Label = $Interface/Instructions
 @onready var straight_button: Button = $Interface/Toolbar/StraightButton
@@ -177,6 +179,8 @@ func _ready() -> void:
 	_setup_camera_keys()
 	_setup_freight_train()
 	_setup_history_controls()
+	_setup_modern_ui_theme()
+	_setup_toolbar_icons()
 
 func _process(delta: float) -> void:
 	_move_camera_with_keyboard(delta)
@@ -1432,7 +1436,16 @@ func _update_toolbar() -> void:
 	)
 	pause_button.set_pressed_no_signal(paused)
 
-	pause_button.text = "Resume" if paused else "Pause"
+	pause_button.text = ""
+
+	if toolbar_icon_textures.size() == 10:
+		pause_button.icon = toolbar_icon_textures[5 if paused else 4]
+
+	pause_button.tooltip_text = (
+		"Resume simulation — Space"
+		if paused
+		else "Pause simulation — Space"
+	)
 
 	rotate_button.disabled = is_dragging or inspect_mode
 	save_button.disabled = is_dragging
@@ -2490,3 +2503,170 @@ func _draw_demolition_preview() -> void:
 			color,
 			2.0
 		)
+func _make_ui_style(
+	background: Color,
+	border: Color,
+	padding: float = 8.0
+) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+
+	style.bg_color = background
+	style.border_color = border
+	style.set_border_width_all(1)
+	style.set_corner_radius_all(7)
+
+	style.content_margin_left = padding
+	style.content_margin_right = padding
+	style.content_margin_top = padding
+	style.content_margin_bottom = padding
+
+	return style
+func _setup_modern_ui_theme() -> void:
+	var ui_theme := Theme.new()
+	ui_theme.default_font_size = 16
+
+	var normal := _make_ui_style(
+		Color("#202B3C"),
+		Color("#35445B")
+	)
+
+	var hover := _make_ui_style(
+		Color("#2C3D55"),
+		Color("#6485AD")
+	)
+
+	var pressed := _make_ui_style(
+		Color("#245B83"),
+		Color("#62B5F2")
+	)
+
+	var disabled := _make_ui_style(
+		Color("#18212F"),
+		Color("#283345")
+	)
+
+	for control_type in ["Button", "OptionButton"]:
+		ui_theme.set_stylebox("normal", control_type, normal)
+		ui_theme.set_stylebox("hover", control_type, hover)
+		ui_theme.set_stylebox("pressed", control_type, pressed)
+		ui_theme.set_stylebox("hover_pressed", control_type, pressed)
+		ui_theme.set_stylebox("disabled", control_type, disabled)
+
+		ui_theme.set_color(
+			"font_color",
+			control_type,
+			Color("#E8EEF6")
+		)
+		ui_theme.set_color(
+			"font_hover_color",
+			control_type,
+			Color.WHITE
+		)
+		ui_theme.set_color(
+			"font_pressed_color",
+			control_type,
+			Color.WHITE
+		)
+		ui_theme.set_color(
+			"font_disabled_color",
+			control_type,
+			Color("#748298")
+		)
+		ui_theme.set_color(
+			"icon_disabled_color",
+			control_type,
+			Color(1.0, 1.0, 1.0, 0.35)
+		)
+
+	ui_theme.set_color("font_color", "Label", Color("#E8EEF6"))
+
+	ui_theme.set_stylebox(
+		"panel",
+		"PanelContainer",
+		_make_ui_style(
+			Color("#172131"),
+			Color("#35445B"),
+			0.0
+		)
+	)
+
+	ui_theme.set_stylebox(
+		"panel",
+		"TooltipPanel",
+		_make_ui_style(
+			Color("#111827"),
+			Color("#536780")
+		)
+	)
+
+	ui_theme.set_color(
+		"font_color",
+		"TooltipLabel",
+		Color("#E8EEF6")
+	)
+
+	# Themes are inherited by the controls inside these UI roots.
+	for child in $Interface.get_children():
+		if child is Control:
+			child.theme = ui_theme
+
+	header_background.color = Color("#111827")
+	instructions.add_theme_font_size_override("font_size", 14)
+
+func _setup_toolbar_icons() -> void:
+	toolbar_icon_textures.clear()
+
+	var cell_size: float = float(TOOLBAR_ICON_SHEET.get_height())
+
+	for index in range(10):
+		var icon := AtlasTexture.new()
+		icon.atlas = TOOLBAR_ICON_SHEET
+		icon.region = Rect2(
+			index * cell_size,
+			0.0,
+			cell_size,
+			cell_size
+		)
+		icon.filter_clip = true
+
+		toolbar_icon_textures.append(icon)
+
+	var buttons: Array[Button] = [
+		straight_button,
+		curve_button,
+		rotate_button,
+		inspect_button,
+		pause_button,
+		save_button,
+		load_button,
+		folder_button,
+		backup_button
+	]
+
+	var icon_indices: Array[int] = [
+		0, 1, 2, 3, 4, 6, 7, 8, 9
+	]
+
+	for index in range(buttons.size()):
+		var button: Button = buttons[index]
+
+		button.text = ""
+		button.icon = toolbar_icon_textures[icon_indices[index]]
+		button.icon_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		button.expand_icon = true
+		button.custom_minimum_size = Vector2(44, 44)
+		button.add_theme_constant_override("icon_max_width", 24)
+
+		# Smooth UI icons while the map retains its pixel-art filtering.
+		button.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
+
+	straight_button.tooltip_text = "Straight track — drag to build"
+	curve_button.tooltip_text = "Curved track — click to place"
+	rotate_button.tooltip_text = "Rotate track — R"
+	inspect_button.tooltip_text = "Inspect stations and industries — I"
+	save_button.tooltip_text = "Save game"
+	load_button.tooltip_text = "Load latest save"
+	folder_button.tooltip_text = "Open save folder"
+	backup_button.tooltip_text = "Load previous save"
+
+	_update_toolbar()
