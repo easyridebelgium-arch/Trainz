@@ -50,7 +50,7 @@ const SAVE_FIELDS: Array[String] = [
 ]
 const MAP_WIDTH: int = 80
 const MAP_HEIGHT: int = 50
-
+const KEYBOARD_PAN_SPEED: float = 600.0
 const MIN_ZOOM: float = 0.5
 const MAX_ZOOM: float = 3.0
 const ZOOM_STEP: float = 1.15
@@ -149,9 +149,11 @@ func _ready() -> void:
 	_setup_toolbar()
 	_reset_camera()
 	_setup_station_inspector()
+	_setup_camera_keys()
 
 
 func _process(delta: float) -> void:
+	_move_camera_with_keyboard(delta)
 	hovered_cell = _mouse_to_cell()
 
 	# Interface messages expire even while simulation is paused.
@@ -1786,3 +1788,55 @@ func _update_freight_inspector() -> void:
 			+ "\n\nFreight deliveries will earn income here."
 			+ "\n\nFreight train service is the next development step."
 		)
+func _setup_camera_keys() -> void:
+	_add_camera_key(&"camera_up", KEY_W)
+	_add_camera_key(&"camera_up", KEY_UP)
+
+	_add_camera_key(&"camera_down", KEY_S)
+	_add_camera_key(&"camera_down", KEY_DOWN)
+
+	_add_camera_key(&"camera_left", KEY_A)
+	_add_camera_key(&"camera_left", KEY_LEFT)
+
+	_add_camera_key(&"camera_right", KEY_D)
+	_add_camera_key(&"camera_right", KEY_RIGHT)
+
+
+func _add_camera_key(action: StringName, physical_key: Key) -> void:
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+
+	var key_event := InputEventKey.new()
+	key_event.physical_keycode = physical_key
+
+	if not InputMap.action_has_event(action, key_event):
+		InputMap.action_add_event(action, key_event)
+
+
+func _move_camera_with_keyboard(delta: float) -> void:
+	# Avoid shifting an unfinished construction preview.
+	if is_dragging or is_panning:
+		return
+
+	var focused_control: Control = get_viewport().gui_get_focus_owner()
+
+	if focused_control is LineEdit or focused_control is TextEdit:
+		return
+
+	var direction: Vector2 = Input.get_vector(
+		&"camera_left",
+		&"camera_right",
+		&"camera_up",
+		&"camera_down"
+	)
+
+	if direction == Vector2.ZERO:
+		return
+
+	var speed: float = KEYBOARD_PAN_SPEED
+
+	if Input.is_key_pressed(KEY_SHIFT):
+		speed *= 2.0
+
+	camera.position += direction * speed * delta / camera.zoom.x
+	camera.force_update_scroll()
