@@ -28,6 +28,8 @@ const STATION_WAIT: float = 2.0
 const SAVE_PATH: String = "user://trainz_save.json"
 const SAVE_TEMP_PATH: String = "user://trainz_save.tmp"
 const RailRouter = preload("res://scripts/rail_router.gd")
+const TrackGeometry = preload("res://scripts/track_geometry.gd")
+const TrackBuilder = preload("res://scripts/track_builder.gd")
 const SAVE_FIELDS: Array[String] = [
 	"money",
 	"total_operating_cost",
@@ -75,7 +77,7 @@ const LOGS_PER_BATCH: int = 5
 const MAX_FOREST_STOCK: int = 100
 const FreightTrain = preload("res://scripts/freight_train.gd")
 const LOG_DELIVERY_PRICE: int = 8
-const SAVE_VERSION: int = 12
+const SAVE_VERSION: int = 13
 const MAX_CONSTRUCTION_HISTORY: int = 100
 const TOOLBAR_ICON_SHEET = preload("res://assets/ui/icons/toolbar.svg")
 const NetworkMap = preload("res://scripts/network_map.gd")
@@ -83,7 +85,10 @@ const ScenarioGoals = preload("res://scripts/scenario_goals.gd")
 
 # A false value means horizontal; true means vertical.
 var tracks: Dictionary = {}
-var placing_vertical: bool = false
+var draw_track_mode: bool = false
+var build_stroke: Array[Vector2i] = []
+var build_plan: Dictionary = {}
+var build_last_hover: Vector2i = Vector2i(-99999, -99999)
 var hovered_cell: Vector2i = Vector2i(-1, -1)
 
 var route_connected: bool = false
@@ -114,8 +119,6 @@ var route_cells: Array[Vector2i] = []
 var route_path: Curve2D = Curve2D.new()
 var route_distance: float = 0.0
 var train_heading: float = 0.0
-# Empty means straight track. Other values connect two compass directions.
-var selected_curve: String = ""
 var is_panning: bool = false
 var inspect_mode: bool = false
 var selected_station: Vector2i = Vector2i(-1, -1)
@@ -201,6 +204,8 @@ func _process(delta: float) -> void:
 	hovered_cell = _mouse_to_cell()
 	if is_dragging and demolition_mode:
 		_collect_demolition_cells(hovered_cell)
+	elif is_dragging:
+		_refresh_build_plan(hovered_cell)
 
 	# Interface messages expire even while simulation is paused.
 	if notice_remaining > 0.0:
@@ -214,7 +219,7 @@ func _process(delta: float) -> void:
 		if _passenger_service_is_active():
 			_move_train(delta)
 			_charge_operating_cost(delta)
-			_check_scenario_objectives()
+		_check_scenario_objectives()
 
 	_update_instructions()
 	_update_toolbar()
@@ -246,14 +251,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				_toggle_inspect_mode()
 				return
 
-			if event.keycode == KEY_T and not is_dragging:
-				if selected_curve.is_empty():
-					_select_curved_track()
-				else:
-					_select_straight_track()
-
-			if event.keycode == KEY_R and not is_dragging:
-				_rotate_selected_track()
 
 			if event.keycode == KEY_SPACE:
 				_toggle_pause()
@@ -282,7 +279,9 @@ func _unhandled_input(event: InputEvent) -> void:
 					demolition_mode = false
 					demolition_cells.clear()
 					drag_start = cell
+					build_stroke.assign([cell])
 					is_dragging = true
+					_refresh_build_plan(cell, true)
 			elif is_dragging:
 				_finish_track_drag(cell)
 
@@ -421,22 +420,13 @@ func _can_build_at(cell: Vector2i) -> bool:
 
 
 func _update_instructions() -> void:
-	var direction: String = "Vertical" if placing_vertical else "Horizontal"
+	var direction: String = "Draw track: follow the mouse" if draw_track_mode else "Connect track: drag between two points"
 	if inspect_mode:
-		direction = "Inspect: click a station track"
+		direction = "Inspect: click a station or industry"
 	elif is_dragging and demolition_mode:
-		direction = "Remove %d tracks — refund £%d" % [
-			demolition_cells.size(),
-			demolition_cells.size() * TRACK_REFUND
-		]
-
-	if not selected_curve.is_empty():
-		direction = "Curve " + selected_curve
-	elif is_dragging:
-		direction = (
-			"Vertical" if _drag_is_vertical(hovered_cell)
-			else "Horizontal"
-		)
+		direction = "Remove %d tracks — refund £%d" % [demolition_cells.size(), demolition_cells.size() * TRACK_REFUND]
+	elif is_dragging and not build_plan.get("error", "").is_empty():
+		direction = "Blocked: " + str(build_plan["error"])
 
 	var status: String = _passenger_service_status()
 
@@ -453,8 +443,8 @@ func _update_instructions() -> void:
 		affordability = " — insufficient funds"
 
 	instructions.text = (
-		"Left-drag: build | Right-click: remove"
-		+ " | T: straight/curve | R: rotate"
+		"Left-drag: automatic track | Right-drag: remove"
+		+ " | Right-click: cancel | Use toolbar to choose Connect or Draw"
 		+ " | Space: pause | Esc: cancel"
 		+ "\n%s | Cell: %d,%d | Build: £%d%s | %s"
 		% [
@@ -490,52 +480,27 @@ func _on_viewport_size_changed() -> void:
 
 func _draw() -> void:
 	_draw_grid()
-
 	for cell in tracks:
 		_draw_track(cell, tracks[cell], false)
-
 	_draw_station(STATION_A, "Station A")
 	_draw_station(STATION_B, "Station B")
 	_draw_station(FOREST_SITE, "Forest")
 	_draw_station(CARGO_TERMINAL, "Terminal")
-
 	if inspect_mode:
 		if selected_station != Vector2i(-1, -1):
-			var selection_rect := Rect2(
-				Vector2(selected_station) * TILE_SIZE,
-				Vector2(TILE_SIZE, TILE_SIZE)
-			)
-
-			draw_rect(
-				selection_rect.grow(3.0),
-				Color(1.0, 0.85, 0.25),
-				false,
-				2.0
-			)
-
+			draw_rect(Rect2(Vector2(selected_station) * TILE_SIZE, Vector2.ONE * TILE_SIZE).grow(3.0), Color(1.0, 0.85, 0.25), false, 2.0)
 	elif is_dragging and demolition_mode:
 		_draw_demolition_preview()
-
 	elif is_dragging:
-		var track_type: Variant = _drag_is_vertical(hovered_cell)
-
-		if not selected_curve.is_empty():
-			track_type = selected_curve
-
-		for cell in _get_drag_cells(hovered_cell):
-			if not tracks.has(cell):
-				_draw_build_preview(cell, track_type)
-
-	else:
-		if _is_inside_map(hovered_cell) and not tracks.has(hovered_cell):
-			var track_type: Variant = placing_vertical
-
-			if not selected_curve.is_empty():
-				track_type = selected_curve
-
-			_draw_build_preview(hovered_cell, track_type)
-
+		for cell in build_plan.get("tiles", {}):
+			_draw_track(cell, build_plan["tiles"][cell], true)
+		for cell in build_plan.get("invalid", {}):
+			_draw_invalid_build_cell(cell)
+	elif _is_inside_map(hovered_cell):
+		var color := Color(0.35, 0.9, 0.55, 0.45) if _can_build_at(hovered_cell) else Color(1.0, 0.2, 0.15, 0.6)
+		draw_rect(Rect2(Vector2(hovered_cell) * TILE_SIZE, Vector2.ONE * TILE_SIZE), color, false, 2.0)
 	_draw_train()
+
 
 func _draw_grid() -> void:
 	var map_size := Vector2(
@@ -574,59 +539,22 @@ func _draw_grid() -> void:
 	)
 
 
-func _draw_track(
-	cell: Vector2i,
-	track_type: Variant,
-	preview: bool
-) -> void:
-	if track_type is String:
-		_draw_curve(cell, track_type, preview)
+func _draw_track(cell: Vector2i, track_type: Variant, preview: bool) -> void:
+	var geometry: Dictionary = TrackGeometry.drawing_data(track_type, float(TILE_SIZE))
+	if geometry.is_empty():
 		return
-
-	var vertical: bool = bool(track_type)
-	var origin: Vector2 = Vector2(cell) * TILE_SIZE
+	draw_set_transform(Vector2(cell) * TILE_SIZE)
 	var rail_color: Color = PREVIEW_COLOR if preview else RAIL_COLOR
 	var sleeper_color: Color = SLEEPER_COLOR
-
 	if preview:
 		sleeper_color.a = 0.5
-
-		draw_rect(
-			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
-			Color(0.35, 0.9, 0.55, 0.12)
-		)
-
-	for offset in [5, 13, 21, 29]:
-		var sleeper_position: Vector2
-		var sleeper_size: Vector2
-
-		if vertical:
-			sleeper_position = origin + Vector2(6, offset - 2)
-			sleeper_size = Vector2(20, 4)
-		else:
-			sleeper_position = origin + Vector2(offset - 2, 6)
-			sleeper_size = Vector2(4, 20)
-
-		draw_rect(
-			Rect2(sleeper_position, sleeper_size),
-			sleeper_color
-		)
-
-	for rail_offset in [10, 22]:
-		if vertical:
-			draw_line(
-				origin + Vector2(rail_offset, 0),
-				origin + Vector2(rail_offset, TILE_SIZE),
-				rail_color,
-				2.0
-			)
-		else:
-			draw_line(
-				origin + Vector2(0, rail_offset),
-				origin + Vector2(TILE_SIZE, rail_offset),
-				rail_color,
-				2.0
-			)
+		draw_rect(Rect2(Vector2.ZERO, Vector2.ONE * TILE_SIZE), Color(0.35, 0.9, 0.55, 0.12))
+	var sleepers: PackedVector2Array = geometry["sleepers"]
+	for index in range(0, sleepers.size(), 2):
+		draw_line(sleepers[index], sleepers[index + 1], sleeper_color, 4.0)
+	draw_polyline(geometry["left"], rail_color, 2.0)
+	draw_polyline(geometry["right"], rail_color, 2.0)
+	draw_set_transform(Vector2.ZERO)
 
 
 func _draw_station(cell: Vector2i, station_name: String) -> void:
@@ -698,109 +626,37 @@ func _draw_train() -> void:
 	# Restore normal drawing coordinates.
 	draw_set_transform(Vector2.ZERO, 0.0)
 
-func _drag_is_vertical(end_cell: Vector2i) -> bool:
-	var difference: Vector2i = end_cell - drag_start
-
-	# A single click uses the orientation selected with R.
-	if difference == Vector2i.ZERO:
-		return placing_vertical
-
-	# A drag snaps to the axis with the largest movement.
-	return abs(difference.y) > abs(difference.x)
 
 
-func _get_drag_cells(end_cell: Vector2i) -> Array[Vector2i]:
-	var cells: Array[Vector2i] = []
 
-	if not selected_curve.is_empty():
-		if _is_inside_map(drag_start):
-			cells.append(drag_start)
 
-		return cells
-
-	if _drag_is_vertical(end_cell):
-		var first_y: int = mini(drag_start.y, end_cell.y)
-		var last_y: int = maxi(drag_start.y, end_cell.y)
-
-		for y in range(first_y, last_y + 1):
-			var cell := Vector2i(drag_start.x, y)
-
-			if _is_inside_map(cell):
-				cells.append(cell)
-	else:
-		var first_x: int = mini(drag_start.x, end_cell.x)
-		var last_x: int = maxi(drag_start.x, end_cell.x)
-
-		for x in range(first_x, last_x + 1):
-			var cell := Vector2i(x, drag_start.y)
-
-			if _is_inside_map(cell):
-				cells.append(cell)
-
-	return cells
 
 
 func _finish_track_drag(end_cell: Vector2i) -> void:
-	var vertical: bool = _drag_is_vertical(end_cell)
-	var new_cells: Array[Vector2i] = []
-
-	for cell in _get_drag_cells(end_cell):
-		if _is_station_space(cell):
-			is_dragging = false
-			_show_notice("Cannot build through a station platform.")
-			queue_redraw()
-			return
-
-		if not tracks.has(cell):
-			new_cells.append(cell)
-
+	_refresh_build_plan(end_cell, true)
 	is_dragging = false
-
-	if new_cells.is_empty():
-		queue_redraw()
+	if not build_plan.get("error", "").is_empty():
+		_show_notice(build_plan["error"])
 		return
-
-	var cost: int = new_cells.size() * TRACK_BUILD_COST
-
-	if money < cost:
-		_show_notice(
-			"Insufficient funds: need £%d, available £%d."
-			% [cost, money]
-		)
-		queue_redraw()
+	var changes: Dictionary = build_plan["changes"]
+	if changes.is_empty():
+		_show_notice("This route is already built.")
 		return
-
+	var cost: int = int(build_plan["new_count"]) * TRACK_BUILD_COST
+	if cost > 0 and money < cost:
+		_show_notice("Insufficient funds: need £%d, available £%d." % [cost, money])
+		return
 	var before: Dictionary = {}
-	var after: Dictionary = {}
-
-	for cell in new_cells:
-		before[cell] = null
-
-		if selected_curve.is_empty():
-			tracks[cell] = vertical
-		else:
-			tracks[cell] = selected_curve
-
-		after[cell] = tracks[cell]
-
+	for cell in changes:
+		before[cell] = tracks.get(cell)
+		tracks[cell] = changes[cell]
 	money -= cost
 	total_construction_cost += cost
-
-	_record_construction_change(
-		before,
-		after,
-		-cost,
-		cost
-	)
-
+	_record_construction_change(before, changes, -cost, cost)
 	_check_route()
-
-	_show_notice(
-		"Built %d track tiles for £%d."
-		% [new_cells.size(), cost]
-	)
-
+	_show_notice("Built %d new tiles for £%d; connections adjusted automatically." % [build_plan["new_count"], cost])
 	queue_redraw()
+
 
 func _generate_passengers(delta: float) -> void:
 	passenger_timer += delta
@@ -856,18 +712,10 @@ func _show_notice(message: String) -> void:
 	notice_remaining = 4.0
 	
 func _get_preview_cost() -> int:
-	if inspect_mode or (is_dragging and demolition_mode):
+	if inspect_mode or not is_dragging or demolition_mode:
 		return 0
-	var tile_count: int = 0
+	return int(build_plan.get("new_count", 0)) * TRACK_BUILD_COST
 
-	if is_dragging:
-		for cell in _get_drag_cells(hovered_cell):
-			if not tracks.has(cell):
-				tile_count += 1
-	elif _can_build_at(hovered_cell) and not tracks.has(hovered_cell):
-		tile_count = 1
-
-	return tile_count * TRACK_BUILD_COST
 
 func _save_game() -> void:
 	if is_dragging:
@@ -904,7 +752,7 @@ func _save_game() -> void:
 		_show_notice("Could not open the temporary save file.")
 		return
 
-	file.store_string(JSON.stringify(data, "\t"))
+	file.store_string(JSON.stringify(data, "\t", true, true))
 	file.flush()
 
 	var write_error: Error = file.get_error()
@@ -1267,77 +1115,12 @@ func _load_game(save_path: String = SAVE_PATH) -> void:
 	_update_history_controls()
 	queue_redraw()
 
-func _draw_curve(
-	cell: Vector2i,
-	curve: String,
-	preview: bool
-) -> void:
-	var origin: Vector2 = Vector2(cell) * TILE_SIZE
-	var center: Vector2
-	var start_angle: float
 
-	match curve:
-		"NE":
-			center = origin + Vector2(TILE_SIZE, 0)
-			start_angle = PI / 2.0
-		"SE":
-			center = origin + Vector2(TILE_SIZE, TILE_SIZE)
-			start_angle = PI
-		"SW":
-			center = origin + Vector2(0, TILE_SIZE)
-			start_angle = PI * 1.5
-		"NW":
-			center = origin
-			start_angle = 0.0
-		_:
-			return
 
-	var end_angle: float = start_angle + PI / 2.0
-	var rail_color: Color = PREVIEW_COLOR if preview else RAIL_COLOR
-	var sleeper_color: Color = SLEEPER_COLOR
 
-	if preview:
-		sleeper_color.a = 0.5
-
-		draw_rect(
-			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
-			Color(0.35, 0.9, 0.55, 0.12)
-		)
-
-	# Sleepers cross the curved rails.
-	for index in range(4):
-		var fraction: float = (float(index) + 0.5) / 4.0
-		var angle: float = lerpf(start_angle, end_angle, fraction)
-		var direction := Vector2(cos(angle), sin(angle))
-
-		draw_line(
-			center + direction * 6.0,
-			center + direction * 26.0,
-			sleeper_color,
-			4.0
-		)
-
-	# Match the spacing of the straight rails at each cell edge.
-	for radius in [10.0, 22.0]:
-		draw_arc(
-			center,
-			radius,
-			start_angle,
-			end_angle,
-			13,
-			rail_color,
-			2.0,
-			false
-		)
-		
 func _is_valid_track_type(value: Variant) -> bool:
-	if typeof(value) == TYPE_BOOL:
-		return true
+	return TrackGeometry.connections(value).size() == 2
 
-	if typeof(value) == TYPE_STRING:
-		return value in ["NE", "SE", "SW", "NW"]
-
-	return false
 
 func _update_train_transform() -> void:
 	if not route_connected:
@@ -1365,41 +1148,15 @@ func _update_train_transform() -> void:
 func _setup_toolbar() -> void:
 	straight_button.pressed.connect(_select_straight_track)
 	curve_button.pressed.connect(_select_curved_track)
-	rotate_button.pressed.connect(_rotate_selected_track)
+	rotate_button.hide()
 	pause_button.pressed.connect(_toggle_pause)
 	save_button.pressed.connect(_save_game)
 	load_button.pressed.connect(_load_game)
 	folder_button.pressed.connect(_open_save_folder)
 	inspect_button.pressed.connect(_toggle_inspect_mode)
-	inspect_button.tooltip_text = "Inspect a station. Shortcut: I"
-	inspect_button.focus_mode = Control.FOCUS_NONE
-
-	straight_button.tooltip_text = "Drag to build straight track."
-	curve_button.tooltip_text = "Click to place a curved track."
-	rotate_button.tooltip_text = "Rotate the selected piece. Shortcut: R"
-	pause_button.tooltip_text = "Pause or resume. Shortcut: Space"
-	save_button.tooltip_text = "Save your current railway."
-	load_button.tooltip_text = "Restore your latest saved railway."
-	folder_button.tooltip_text = "Open the folder containing your saved game."
-
-	# Keep Space available for pausing after clicking a button.
-	for button in [
-		straight_button,
-		curve_button,
-		rotate_button,
-		pause_button,
-		save_button,
-		load_button,
-		folder_button
-	]:
+	backup_button.pressed.connect(_load_game.bind(SAVE_BACKUP_PATH))
+	for button in [straight_button, curve_button, pause_button, save_button, load_button, folder_button, inspect_button, backup_button]:
 		button.focus_mode = Control.FOCUS_NONE
-		backup_button.pressed.connect(
-		_load_game.bind(SAVE_BACKUP_PATH)
-	)
-
-	backup_button.tooltip_text = "Restore the version before your latest save."
-	backup_button.focus_mode = Control.FOCUS_NONE
-
 	_update_toolbar()
 
 
@@ -1407,7 +1164,8 @@ func _select_straight_track() -> void:
 	inspect_mode = false
 	_close_station_inspector()
 	is_dragging = false
-	selected_curve = ""
+	draw_track_mode = false
+	build_plan.clear()
 	_update_toolbar()
 
 
@@ -1415,30 +1173,8 @@ func _select_curved_track() -> void:
 	inspect_mode = false
 	_close_station_inspector()
 	is_dragging = false
-
-	if selected_curve.is_empty():
-		selected_curve = "NE"
-
-	_update_toolbar()
-
-
-func _rotate_selected_track() -> void:
-	if is_dragging or inspect_mode:
-		return
-
-	if selected_curve.is_empty():
-		placing_vertical = not placing_vertical
-	else:
-		match selected_curve:
-			"NE":
-				selected_curve = "SE"
-			"SE":
-				selected_curve = "SW"
-			"SW":
-				selected_curve = "NW"
-			"NW":
-				selected_curve = "NE"
-
+	draw_track_mode = true
+	build_plan.clear()
 	_update_toolbar()
 
 
@@ -1462,11 +1198,11 @@ func _update_toolbar() -> void:
 	inspect_button.set_pressed_no_signal(inspect_mode)
 
 	straight_button.set_pressed_no_signal(
-		not inspect_mode and selected_curve.is_empty()
+		not inspect_mode and not draw_track_mode
 	)
 
 	curve_button.set_pressed_no_signal(
-		not inspect_mode and not selected_curve.is_empty()
+		not inspect_mode and draw_track_mode
 	)
 	pause_button.set_pressed_no_signal(paused)
 
@@ -1481,7 +1217,6 @@ func _update_toolbar() -> void:
 		else "Pause simulation — Space"
 	)
 
-	rotate_button.disabled = is_dragging or inspect_mode
 	save_button.disabled = is_dragging
 	load_button.disabled = is_dragging
 	backup_button.disabled = is_dragging
@@ -1789,33 +1524,12 @@ func _update_upgrade_button(
 	else:
 		button.tooltip_text = benefit
 
-func _draw_build_preview(cell: Vector2i, track_type: Variant) -> void:
-	if _is_station_space(cell):
-		var origin: Vector2 = Vector2(cell) * TILE_SIZE
-		var warning_color := Color(1.0, 0.3, 0.25)
+func _draw_invalid_build_cell(cell: Vector2i) -> void:
+	var origin: Vector2 = Vector2(cell) * TILE_SIZE
+	draw_rect(Rect2(origin, Vector2.ONE * TILE_SIZE), Color(1.0, 0.15, 0.1, 0.3))
+	draw_line(origin + Vector2(6, 6), origin + Vector2(TILE_SIZE - 6, TILE_SIZE - 6), Color(1.0, 0.3, 0.25), 2.0)
+	draw_line(origin + Vector2(TILE_SIZE - 6, 6), origin + Vector2(6, TILE_SIZE - 6), Color(1.0, 0.3, 0.25), 2.0)
 
-		draw_rect(
-			Rect2(origin, Vector2(TILE_SIZE, TILE_SIZE)),
-			Color(1.0, 0.15, 0.1, 0.25)
-		)
-
-		draw_line(
-			origin + Vector2(6, 6),
-			origin + Vector2(TILE_SIZE - 6, TILE_SIZE - 6),
-			warning_color,
-			2.0
-		)
-
-		draw_line(
-			origin + Vector2(TILE_SIZE - 6, 6),
-			origin + Vector2(6, TILE_SIZE - 6),
-			warning_color,
-			2.0
-		)
-
-		return
-
-	_draw_track(cell, track_type, true)
 
 func _remove_station_space_tracks(track_data: Dictionary) -> int:
 	var removed_count: int = 0
@@ -2687,7 +2401,6 @@ func _setup_toolbar_icons() -> void:
 	var buttons: Array[Button] = [
 		straight_button,
 		curve_button,
-		rotate_button,
 		inspect_button,
 		pause_button,
 		save_button,
@@ -2697,7 +2410,7 @@ func _setup_toolbar_icons() -> void:
 	]
 
 	var icon_indices: Array[int] = [
-		0, 1, 2, 3, 4, 6, 7, 8, 9
+		0, 1, 3, 4, 6, 7, 8, 9
 	]
 
 	for index in range(buttons.size()):
@@ -2713,9 +2426,8 @@ func _setup_toolbar_icons() -> void:
 		# Smooth UI icons while the map retains its pixel-art filtering.
 		button.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR
 
-	straight_button.tooltip_text = "Straight track — drag to build"
-	curve_button.tooltip_text = "Curved track — click to place"
-	rotate_button.tooltip_text = "Rotate track — R"
+	straight_button.tooltip_text = "Connect track — drag between two points; automatic diagonal and platform approaches"
+	curve_button.tooltip_text = "Draw track — hold left mouse and change direction; bends are automatic"
 	inspect_button.tooltip_text = "Inspect stations and industries — I"
 	save_button.tooltip_text = "Save game"
 	load_button.tooltip_text = "Load latest save"
@@ -2960,3 +2672,25 @@ func _update_objective_panel() -> void:
 		target,
 		int(goal["reward"])
 	]
+
+
+func _refresh_build_plan(target: Vector2i, force: bool = false) -> void:
+	if not force and target == build_last_hover:
+		return
+	build_last_hover = target
+	var cells: Array[Vector2i]
+	if draw_track_mode:
+		if build_stroke.is_empty():
+			build_stroke.append(drag_start)
+		if target != build_stroke.back():
+			if (build_stroke.size() == 1 and tracks.has(drag_start)) or tracks.has(target):
+				var addition: Array[Vector2i] = TrackBuilder.line(build_stroke.back(), target, tracks)
+				for index in range(1, addition.size()):
+					TrackBuilder.append_stroke(build_stroke, addition[index])
+			else:
+				TrackBuilder.append_stroke(build_stroke, target)
+		cells = build_stroke
+	else:
+		cells = TrackBuilder.line(drag_start, target, tracks)
+	var fixed: Array[Vector2i] = [STATION_A, STATION_B, FOREST_SITE, CARGO_TERMINAL]
+	build_plan = TrackBuilder.plan(cells, tracks, Vector2i(MAP_WIDTH, MAP_HEIGHT), _is_station_space, fixed)
