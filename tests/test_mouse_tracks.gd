@@ -29,6 +29,18 @@ func _plan(cells: Array[Vector2i], tracks: Dictionary = {}) -> Dictionary:
 
 func _run() -> void:
 	for direction in Geometry.DIRECTIONS:
+		var origin := Vector2i(30, 25)
+		var perpendicular := Vector2i(-direction.y, direction.x)
+		var existing: Dictionary = {origin: Geometry.from_ports(-direction, direction)}
+		var target: Vector2i = origin + direction * 6 + perpendicular * 3
+		var extension: Array[Vector2i] = Builder.line(origin, target, existing)
+		var extension_plan: Dictionary = _plan(extension, existing)
+		check(extension_plan["error"].is_empty(), "Existing rail must extend before turning in direction " + str(direction))
+		check(Geometry.same_connections(extension_plan["tiles"].get(origin + direction), existing[origin]), "First new tile must preserve the existing exit direction")
+		check(Router.find_route(extension_plan["tiles"], origin, target) == extension, "Straight lead-out and later bend must remain connected")
+	var close_tracks: Dictionary = {Vector2i(10, 10): false, Vector2i(12, 10): false}
+	check(_plan(Builder.line(Vector2i(10, 10), Vector2i(12, 10), close_tracks), close_tracks)["error"].is_empty(), "A single-tile gap between aligned rails must still build")
+	for direction in Geometry.DIRECTIONS:
 		var cells: Array[Vector2i] = Builder.line(Vector2i(15, 15), Vector2i(15, 15) + direction * 5, {})
 		var plan: Dictionary = _plan(cells)
 		check(plan["error"].is_empty(), "All eight straight directions must build: " + str(direction))
@@ -73,8 +85,20 @@ func _run() -> void:
 	game.is_dragging = true
 	game._finish_track_drag(Vector2i(10, 12))
 	check(game.tracks.size() > initial.size(), "Automatic diagonal departure from a platform must build")
+	check(Geometry.same_connections(game.tracks.get(game.STATION_A + Vector2i.RIGHT), false), "Connect must keep the first new station tile horizontal")
 	game._undo_construction()
 	check(game.tracks == initial and game.money == 5000, "Undo must restore the original rails and exact funds")
+	game.draw_track_mode = true
+	game.drag_start = game.STATION_A
+	game.build_stroke.clear()
+	game.build_stroke.append(game.drag_start)
+	game.is_dragging = true
+	game._refresh_build_plan(game.STATION_A + Vector2i.RIGHT, true)
+	game._refresh_build_plan(Vector2i(10, 12), true)
+	check(game.build_plan["error"].is_empty() and Geometry.same_connections(game.build_plan["tiles"].get(game.STATION_A + Vector2i.RIGHT), false), "Draw must preserve the first tile when the pointer visits it before turning")
+	game._finish_track_drag(Vector2i(10, 12))
+	check(Geometry.same_connections(game.tracks.get(game.STATION_A + Vector2i.RIGHT), false), "Draw release must preserve the horizontal lead-out")
+	game._undo_construction()
 
 	# One freehand gesture creates a complete passenger detour with true diagonals.
 	var passenger: Array[Vector2i] = [game.STATION_A]

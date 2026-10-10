@@ -17,16 +17,21 @@ static func line(start: Vector2i, finish: Vector2i, tracks: Dictionary) -> Array
 	if start == finish:
 		return segment(start, finish)
 	var direct: Vector2i = finish - start
-	if maxi(absi(direct.x), absi(direct.y)) <= 1:
-		if (not tracks.has(start) or Geometry.connections(tracks[start]).has(direct)) and (not tracks.has(finish) or Geometry.connections(tracks[finish]).has(-direct)):
+	if direct.x == 0 or direct.y == 0 or absi(direct.x) == absi(direct.y):
+		var direction := Vector2i(signi(direct.x), signi(direct.y))
+		if (not tracks.has(start) or Geometry.connections(tracks[start]).has(direction)) and (not tracks.has(finish) or Geometry.connections(tracks[finish]).has(-direction)):
 			return segment(start, finish)
 	var first: Vector2i = start
 	var last: Vector2i = finish
+	var cells: Array[Vector2i] = [start]
 	if tracks.has(start):
-		first += _endpoint_port(start, finish, tracks)
+		# Preserve a full straight tile beyond the existing rail's exit.
+		# The following tile may bend toward the pointer.
+		var port: Vector2i = _endpoint_port(start, finish, tracks)
+		cells.append(start + port)
+		first = start + port * 2
 	if tracks.has(finish):
 		last += _endpoint_port(finish, start, tracks)
-	var cells: Array[Vector2i] = [start]
 	for cell in segment(first, last):
 		if cell != cells.back():
 			cells.append(cell)

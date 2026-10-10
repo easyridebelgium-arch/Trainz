@@ -2683,7 +2683,11 @@ func _refresh_build_plan(target: Vector2i, force: bool = false) -> void:
 		if build_stroke.is_empty():
 			build_stroke.append(drag_start)
 		if target != build_stroke.back():
-			if (build_stroke.size() == 1 and tracks.has(drag_start)) or tracks.has(target):
+			if build_stroke.size() <= 2 and tracks.has(drag_start):
+				# A pointer update on the first new tile must not let the
+				# next update turn that tile into a bend.
+				build_stroke = TrackBuilder.line(drag_start, target, tracks)
+			elif tracks.has(target):
 				var addition: Array[Vector2i] = TrackBuilder.line(build_stroke.back(), target, tracks)
 				for index in range(1, addition.size()):
 					TrackBuilder.append_stroke(build_stroke, addition[index])
